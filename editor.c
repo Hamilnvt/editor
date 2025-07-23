@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
+#include <fcntl.h>
 
 #define STRINGS_IMPLEMNTATION
 #include "../libs/strings.h"
@@ -59,9 +60,10 @@ typedef struct
 #define QUIT_DEFAULT 3
 
 #define CRNL "\r\n"
-#define CURRENT_POS (editor.rowoff+editor.cy) 
+#define CURRENT_Y_POS (editor.rowoff+editor.cy) 
+#define CURRENT_X_POS (editor.coloff+editor.cx) 
 #define ROW(i) (&editor.rows.items[i])
-#define CURRENT_ROW ROW(CURRENT_POS)
+#define CURRENT_ROW ROW(CURRENT_Y_POS)
 
 /* ANSI escape sequences */
 #define ANSI_GO_HOME_CURSOR "\x1B[H"
@@ -101,6 +103,7 @@ typedef enum
 
 
 // Global variables ////////////////////////////// 
+int DISCARD_CHAR_RETURN;
 Editor editor = {0};
 String screen_buf = {0};
 //////////////////////////////////////////////////
@@ -138,6 +141,7 @@ struct termios term_old;
 void reset_terminal(void)
 {
     if (editor.rawmode) {
+        term_old.c_iflag |= ICRNL;
         tcsetattr(STDIN_FILENO ,TCSAFLUSH, &term_old);
         editor.rawmode = false;
     }
@@ -331,9 +335,19 @@ void editor_refresh_screen(void)
         row = ROW(filerow);
 
         size_t len = strlen(row->content.items) - editor.coloff;
-        if (len > 0 && len > editor.screencols) len = editor.screencols; // TODO: viene troncata la riga
-        s_push_str(&screen_buf, row->content.items, len);
-        s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
+        if (len > 0) {
+            if (len > editor.screencols) len = editor.screencols; // TODO: viene troncata la riga
+            int c;
+            for (size_t j = 0; j < len; j++) {
+                c = row->content.items[j];
+                if (!isprint(c)) {
+                    s_push_cstr(&screen_buf, ANSI_INVERSE);
+                    s_push(&screen_buf, c <= 26 ? '@'+c : '?');
+                    s_push_cstr(&screen_buf, ANSI_RESET);
+                } else s_push(&screen_buf, c);
+            }
+            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
+        } else s_push_cstr(&screen_buf, CRNL);
     }
 
     /* Create a two rows status. First row: */
@@ -341,15 +355,15 @@ void editor_refresh_screen(void)
     s_push_cstr(&screen_buf, ANSI_INVERSE); // displayed with inversed colours
 
     char perc_buf[4];
-    if (CURRENT_POS == 0) sprintf(perc_buf, "%s", "Top");
-    else if (CURRENT_POS >= editor.rows.count-1) sprintf(perc_buf, "%s", "Bot");
-    else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_POS)/(editor.rows.count))*100));
+    if (CURRENT_Y_POS == 0) sprintf(perc_buf, "%s", "Top");
+    else if (CURRENT_Y_POS >= editor.rows.count-1) sprintf(perc_buf, "%s", "Bot");
+    else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
 
     char status[80];
     size_t len = snprintf(status, sizeof(status), " %s - (%zu, %zu) - %zu lines (%s) - [page %zu/%zu]", 
             editor.filename == NULL ? "unnamed" : editor.filename, 
             editor.cx+1, 
-            CURRENT_POS+1, 
+            CURRENT_Y_POS+1, 
             editor.rows.count, 
             perc_buf,
             editor.page+1,
@@ -358,7 +372,7 @@ void editor_refresh_screen(void)
     //size_t len = snprintf(status, sizeof(status), "%.20s - %zu lines %s",
     //                      editor.filename, editor.rows.count, editor.dirty ? "(modified)" : "");
     char rstatus[80];
-    size_t rlen = snprintf(rstatus, sizeof(rstatus), "%zu/%zu", CURRENT_POS+1, editor.rows.count);
+    size_t rlen = snprintf(rstatus, sizeof(rstatus), "%zu/%zu", CURRENT_Y_POS+1, editor.rows.count);
     if (len > editor.screencols) len = editor.screencols;
     s_push_str(&screen_buf, status, len);
     while (len < editor.screencols) {
@@ -384,7 +398,7 @@ void editor_refresh_screen(void)
      * because of TABs. */
     size_t j;
     size_t cx = 1;
-    filerow = CURRENT_POS;
+    filerow = CURRENT_Y_POS;
     row = (filerow >= editor.rows.count) ? NULL : ROW(filerow);
     if (row) {
         size_t rowlen = strlen(row->content.items);
@@ -451,7 +465,7 @@ void editor_open_file(char *filename)
     editor.pages = 0;
 
     if (filename == NULL) {
-        editor.filename = strdup("new file");
+        editor.filename = strdup("new");
         return;
     }
 
@@ -659,30 +673,40 @@ void itoa(int n, char *buf)
     for (int i = 0; i < len; i++) buf[i] = tmp[len-i-1];
 }
 
-//bool editor_save(void)
-//{
-//    int len;
-//    char *buf = editorRowsToString(&len);
-//    int fd = open(E.filename,O_RDWR|O_CREAT,0644);
-//    if (fd == -1) goto writeerr;
-//
-//    /* Use truncate + a single write(2) call in order to make saving
-//     * a bit safer, under the limits of what we can do in a small editor. */
-//    if (ftruncate(fd,len) == -1) goto writeerr;
-//    if (write(fd,buf,len) != len) goto writeerr;
-//
-//    close(fd);
-//    free(buf);
-//    E.dirty = 0;
-//    editorSetStatusMessage("%d bytes written on disk", len);
-//    return 0;
-//
-//writeerr:
-//    free(buf);
-//    if (fd != -1) close(fd);
-//    editorSetStatusMessage("Can't save! I/O error: %s",strerror(errno));
-//    return 1;
-//}
+bool editor_save(void)
+{
+    String save_buf = {0};
+    da_default(&save_buf);
+    // TODO: build save_buf from editor.rows
+    for (size_t i = 0; i < editor.rows.count; i++) {
+        Row *row = ROW(i);
+        s_push_str(&save_buf, row->content.items, strlen(row->content.items));
+        s_push(&save_buf, '\n');
+    }
+    s_push_null(&save_buf);
+
+    // TODO: make the user decide, in the status line, the name of the file if not set
+    int fd = open(editor.filename, O_RDWR|O_CREAT, 0644);
+    if (fd == -1) goto writeerr;
+
+    /* Use truncate + a single write(2) call in order to make saving
+     * a bit safer, under the limits of what we can do in a small editor. */
+    size_t len = strlen(save_buf.items);
+    if (ftruncate(fd, len) == -1) goto writeerr;
+    if (write(fd, save_buf.items, len) != (ssize_t)len) goto writeerr;
+
+    close(fd);
+    s_free(&save_buf);
+    editor.dirty = 0;
+    editor_set_statusmsg("%zu bytes written on disk", len);
+    return 0;
+
+writeerr:
+    s_free(&save_buf);
+    if (fd != -1) close(fd);
+    editor_set_statusmsg("Can't save! I/O error: %s", strerror(errno));
+    return 1;
+}
 
 bool editor_quit(void)
 {
@@ -692,6 +716,58 @@ bool editor_quit(void)
         return false;
     }
     return true;
+}
+
+// TODO: make bound checks
+void editor_insert_row(size_t at, Row row)
+{
+    if (da_is_empty(editor.rows)) {
+        da_push(&editor.rows, row);
+    } else {
+        da_insert(&editor.rows, row, (int)at);
+    }
+    editor.dirty++;
+}
+
+void editor_insert_char_at(Row *row, size_t at, int c) {
+    if (at >= row->content.count) {
+        size_t padlen = at-row->content.count;
+        if (row->content.count > 0) {
+            da_pop(&row->content, DISCARD_CHAR_RETURN); // pop '\0' // TODO: forse coviene non averlo (oppure devo capire se figura nel count) [probabilmente ci sta tenerlo]
+        }
+        for (size_t i = 0; i <= padlen; i++)
+            s_push(&row->content, ' ');
+        s_push(&row->content, c);
+        s_push_null(&row->content);
+    } else {
+        if (row->content.count == 0) {
+            da_push(&row->content, c);
+            s_push_null(&row->content);
+        } else {
+            da_insert(&row->content, c, (int)at);
+        }
+    }
+    editor.dirty++;
+}
+
+void editor_insert_char(char c)
+{
+    size_t filerow = CURRENT_Y_POS;
+    size_t filecol = editor.coloff+editor.cx;
+    Row *row = (filerow >= editor.rows.count) ? NULL : CURRENT_ROW;
+
+    if (!row) {
+        while (editor.rows.count <= filerow) {
+            Row newrow = {0};
+            da_default(&newrow.content);
+            editor_insert_row(editor.rows.count-1, newrow);
+        }
+        row = CURRENT_ROW;
+    }
+    editor_insert_char_at(row, filecol, c);
+    if (editor.cx == editor.screencols-1) editor.coloff++;
+    else editor.cx++;
+    editor.dirty++;
 }
 
 // TODO: process number as in process_key
@@ -749,8 +825,7 @@ void editor_process_key_press(void)
                 if (editor_quit()) exit(0);
                 else return;
             case CTRL_S:
-                editor_set_statusmsg("TODO: SAVE");
-                //editor_save();
+                editor_save();
                 break;
             case BACKSPACE:
                 editor_set_statusmsg("TODO: BACKSPACE");
@@ -772,11 +847,8 @@ void editor_process_key_press(void)
 
             case ESC: break;
             default:
-                      char key_buf[32];
-                      key_to_name(key, key_buf);
-                      editor_set_statusmsg("key: %s", key_buf);
-                      //editorInsertChar(c);
-                      break;
+                editor_insert_char(key);
+                break;
         }
         editor.N = N_DEFAULT;
     }
