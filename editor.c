@@ -1,5 +1,6 @@
 /* TODO:
     - needs_redraw tecnology (ma prima deve funzionare tutto il resto)
+    - capire come leggere ctrl-shift-x
 
     - ref: https://viewsourcecode.org/snaptoken/kilo/index.html
 */
@@ -54,12 +55,13 @@ typedef struct
 } Editor;
 
 #define N_DEFAULT -1 
-#define N_OR_DEFAULT_VALUE(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
+#define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
 #define QUIT_DEFAULT 3
 
 #define CRNL "\r\n"
-#define GET_ROW(i) (&editor.rows.items[i])
-#define GET_CURR_ROW (&editor.rows.items[editor.rowoff+editor.cy])
+#define CURRENT_POS (editor.rowoff+editor.cy) 
+#define ROW(i) (&editor.rows.items[i])
+#define CURRENT_ROW ROW(CURRENT_POS)
 
 /* ANSI escape sequences */
 #define ANSI_GO_HOME_CURSOR "\x1B[H"
@@ -78,10 +80,23 @@ typedef enum
     KEY_NULL  = 0,
     TAB       = 9,
     ENTER     = 13,
+    CTRL_H    = 8,
+    CTRL_J    = 10,
+    CTRL_K    = 11,
+    CTRL_L    = 12,
     CTRL_Q    = 17,
     CTRL_S    = 19,
     ESC       = 27,
     BACKSPACE = 127,
+
+    ALT_k     = 1000,
+    ALT_K,
+    ALT_j,
+    ALT_J,
+    ALT_h,
+    ALT_H,
+    ALT_l,
+    ALT_L,
 } Key;
 
 
@@ -131,9 +146,10 @@ void reset_terminal(void)
 void editor_at_exit(void)
 {
     s_free(&screen_buf);
+    printf(ANSI_CLEAR_SCREEN);
+    printf(ANSI_GO_HOME_CURSOR);
     reset_terminal();
     log_this("Exit");
-    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
 }
 
 bool enable_raw_mode(void)
@@ -149,7 +165,7 @@ bool enable_raw_mode(void)
     term_raw.c_cflag |= (CS8);
     term_raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
     term_raw.c_cc[VMIN] = 0;
-    term_raw.c_cc[VTIME] = 1;
+    term_raw.c_cc[VTIME] = 1; // TODO: vedere come cambia la reattività per le ALT-sequences
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_raw) < 0) return false;
     editor.rawmode = true;
@@ -163,55 +179,70 @@ int editor_read_key()
     while ((nread = read(STDIN_FILENO, &c, 1)) == 0);
     if (nread == -1) exit(1); // TODO: report error (stdin probably failed)
 
-    while (true) {
+    while (true) { // TODO: perché?
         switch (c) {
         case ESC:    /* escape sequence */
-            int seq[3];
+            int seq[3] = {0};
+
             /* If this is just an ESC, we'll timeout here. */
-            if (read(STDIN_FILENO, seq,   1) == 0) return ESC;
-            if (read(STDIN_FILENO, seq+1, 1) == 0) return ESC;
+            if (read(STDIN_FILENO, seq, 1) == 0) return ESC;
 
-            /* ESC [ sequences. */
-            if (seq[0] == '[') {
-                if (isdigit(seq[1])) {
-                    /* Extended escape, read additional byte. */
-                    if (read(STDIN_FILENO, seq+2, 1) == 0) return ESC;
-                    if (seq[2] == '~') {
-                        //editor_set_statusmsg("Pressed: crazy ESC ~ sequence");
-                        log_this("Pressed: crazy ESC ~ sequence");
-                        return '\0';
-                        //switch (seq[1]) {
-                        //case '3': return DEL_KEY;
-                        //case '5': return PAGE_UP;
-                        //case '6': return PAGE_DOWN;
-                        //}
-                    }
-                } else {
-                    //editor_set_statusmsg("Pressed: crazy ESC sequence");
-                    log_this("Pressed: crazy ESC sequence");
-                    return '\0';
-                    //switch (seq[1]) {
-                    //case 'A': return ARROW_UP;
-                    //case 'B': return ARROW_DOWN;
-                    //case 'C': return ARROW_RIGHT;
-                    //case 'D': return ARROW_LEFT;
-                    //case 'H': return HOME_KEY;
-                    //case 'F': return END_KEY;
-                    //}
+            if (read(STDIN_FILENO, seq+1, 1) == 0) {
+                switch (seq[0]) { /* ALT-X sequence */
+                    case 'k': return ALT_k;
+                    case 'K': return ALT_K;
+                    case 'j': return ALT_j;
+                    case 'J': return ALT_J;
+                    case 'h': return ALT_h;
+                    case 'H': return ALT_H;
+                    case 'l': return ALT_l;
+                    case 'L': return ALT_L;
+                    default : return ESC;
                 }
-            }
+            } else return ESC;
 
-            /* ESC O sequences. */
-            else if (seq[0] == 'O') {
-                //editor_set_statusmsg("Pressed: crazy ESC O sequence");
-                log_this("Pressed: crazy ESC O sequence");
-                return '\0';
-                //switch(seq[1]) {
-                //case 'H': return HOME_KEY;
-                //case 'F': return END_KEY;
-                //}
-            }
-            break;
+            // TODO: probabilmente non userò queste sequenze, ma il codice lo tengo, non si sa mai
+            /* ESC [ sequences. */
+            //if (seq[0] == '[') {
+            //    if (isdigit(seq[1])) {
+            //        /* Extended escape, read additional byte. */
+            //        if (read(STDIN_FILENO, seq+2, 1) == 0) return ESC;
+            //        log_this("2: %d", seq[2]);
+            //        if (seq[2] == '~') {
+            //            //editor_set_statusmsg("Pressed: crazy ESC ~ sequence");
+            //            log_this("Pressed: crazy ESC ~ sequence");
+            //            return '\0';
+            //            //switch (seq[1]) {
+            //            //case '3': return DEL_KEY;
+            //            //case '5': return PAGE_UP;
+            //            //case '6': return PAGE_DOWN;
+            //            //}
+            //        }
+            //    } else {
+            //        //editor_set_statusmsg("Pressed: crazy ESC sequence");
+            //        log_this("Pressed: crazy ESC sequence");
+            //        return '\0';
+            //        //switch (seq[1]) {
+            //        //case 'A': return ARROW_UP;
+            //        //case 'B': return ARROW_DOWN;
+            //        //case 'C': return ARROW_RIGHT;
+            //        //case 'D': return ARROW_LEFT;
+            //        //case 'H': return HOME_KEY;
+            //        //case 'F': return END_KEY;
+            //        //}
+            //    }
+            //}
+
+            ///* ESC O sequences. */
+            //else if (seq[0] == 'O') {
+            //    //editor_set_statusmsg("Pressed: crazy ESC O sequence");
+            //    log_this("Pressed: crazy ESC O sequence");
+            //    return '\0';
+            //    //switch(seq[1]) {
+            //    //case 'H': return HOME_KEY;
+            //    //case 'F': return END_KEY;
+            //    //}
+            //}
         default: return c;
         }
     }
@@ -297,7 +328,7 @@ void editor_refresh_screen(void)
             continue;
         }
 
-        row = GET_ROW(filerow);
+        row = ROW(filerow);
 
         size_t len = strlen(row->content.items) - editor.coloff;
         if (len > 0 && len > editor.screencols) len = editor.screencols; // TODO: viene troncata la riga
@@ -308,17 +339,30 @@ void editor_refresh_screen(void)
     /* Create a two rows status. First row: */
     s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR);
     s_push_cstr(&screen_buf, ANSI_INVERSE); // displayed with inversed colours
+
+    char perc_buf[4];
+    if (CURRENT_POS == 0) sprintf(perc_buf, "%s", "Top");
+    else if (CURRENT_POS >= editor.rows.count-1) sprintf(perc_buf, "%s", "Bot");
+    else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_POS)/(editor.rows.count))*100));
+
     char status[80];
-    size_t len = snprintf(status, sizeof(status), "%.20s - %zu lines %s",
-                          editor.filename, editor.rows.count, editor.dirty ? "(modified)" : "");
-    log_this("status: `%s`", status);
+    size_t len = snprintf(status, sizeof(status), " %s - (%zu, %zu) - %zu lines (%s) - [page %zu/%zu]", 
+            editor.filename == NULL ? "unnamed" : editor.filename, 
+            editor.cx+1, 
+            CURRENT_POS+1, 
+            editor.rows.count, 
+            perc_buf,
+            editor.page+1,
+            editor.pages
+    ); // TODO: percentuale
+    //size_t len = snprintf(status, sizeof(status), "%.20s - %zu lines %s",
+    //                      editor.filename, editor.rows.count, editor.dirty ? "(modified)" : "");
     char rstatus[80];
-    size_t rlen = snprintf(rstatus, sizeof(rstatus), "%zu/%zu", editor.rowoff+editor.cy+1, editor.rows.count);
-    log_this("rstatus: `%s`", rstatus);
+    size_t rlen = snprintf(rstatus, sizeof(rstatus), "%zu/%zu", CURRENT_POS+1, editor.rows.count);
     if (len > editor.screencols) len = editor.screencols;
     s_push_str(&screen_buf, status, len);
     while (len < editor.screencols) {
-        if (editor.screencols - len == rlen) {
+        if (editor.screencols - (len+1) == rlen) {
             break;
         } else {
             s_push(&screen_buf, ' ');
@@ -326,6 +370,7 @@ void editor_refresh_screen(void)
         }
     }
     s_push_str(&screen_buf, rstatus, rlen);
+    s_push(&screen_buf, ' ');
     s_push_cstr(&screen_buf, ANSI_RESET CRNL);
 
     /* Second row depends on editor.statusmsg and the status message update time. */
@@ -333,15 +378,14 @@ void editor_refresh_screen(void)
     size_t msglen = strlen(editor.statusmsg);
     if (msglen && time(NULL)-editor.statusmsg_time < 3) // TODO: make 3 a variable, max seconds to show the msg
         s_push_str(&screen_buf, editor.statusmsg, msglen <= editor.screencols ? msglen : editor.screencols);
-    log_this("message: `%s`", editor.statusmsg);
 
     /* Put cursor at its current position. Note that the horizontal position
      * at which the cursor is displayed may be different compared to 'editor.cx'
      * because of TABs. */
     size_t j;
     size_t cx = 1;
-    filerow = editor.rowoff+editor.cy;
-    row = (filerow >= editor.rows.count) ? NULL : GET_ROW(filerow);
+    filerow = CURRENT_POS;
+    row = (filerow >= editor.rows.count) ? NULL : ROW(filerow);
     if (row) {
         size_t rowlen = strlen(row->content.items);
         for (j = editor.coloff; j < (editor.cx+editor.coloff); j++) {
@@ -352,7 +396,6 @@ void editor_refresh_screen(void)
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%zu;%zuH", editor.cy+1, cx);
     s_push_str(&screen_buf, buf, strlen(buf));
-    log_this("(cx, cy): (%zu, %zu)", editor.cy+1, cx);
 
     s_push_cstr(&screen_buf, ANSI_SHOW_CURSOR);
     s_push_null(&screen_buf);
@@ -441,7 +484,7 @@ void editor_open_file(char *filename)
 //{
 //    for (size_t i = 0; i < editor.screenrows; i++) {
 //        if (i < editor.rows.count) {
-//            Row *row = GET_ROW(editor.page*editor.screenrows+editor.rowoff+i);
+//            Row *row = ROW(editor.page*editor.screenrows+editor.rowoff+i);
 //            s_push_str(&screen_buf, row->content.items, strlen(row->content.items));    
 //        }
 //        s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
@@ -457,7 +500,7 @@ void editor_open_file(char *filename)
 //
 //    char perc_buf[32] = {0};
 //    if (editor.rowoff == 0) sprintf(perc_buf, "%s", "Top");
-//    else if (editor.rowoff == editor.rows.count-1) sprintf(perc_buf, "%s", "Bottom");
+//    else if (editor.rowoff == editor.rows.count-1) sprintf(perc_buf, "%s", "Bot");
 //    else sprintf(perc_buf, "%d%%", curr_row_percentile());
 //
 //    char status[128] = {0};
@@ -482,120 +525,121 @@ void editor_open_file(char *filename)
 // TODO: now it's trivial
 void move_cursor_up() 
 {
-    //if (editor.cy == 0 && editor.page != 0) editor.rowoff--; // TODO: gestisci meglio
-    if (editor.cy > N_OR_DEFAULT_VALUE(0)) editor.cy -= N_OR_DEFAULT_VALUE(1);
+    if (editor.cy == 0 && editor.page != 0) editor.rowoff--; // TODO: deve cambiare anche la pagina
+    if (editor.cy > N_OR_DEFAULT(0)) editor.cy -= N_OR_DEFAULT(1);
     else editor.cy = 0;
-    //if (editor.rowoff > N_OR_DEFAULT_VALUE(0)) editor.rowoff -= N_OR_DEFAULT_VALUE(1);
+    //if (editor.rowoff > N_OR_DEFAULT(0)) editor.rowoff -= N_OR_DEFAULT(1);
     //else editor.rowoff = 0;
 }
 
 // TODO: now it's trivial
 void move_cursor_down()
 { 
-    //if ((editor.rowoff+N_OR_DEFAULT_VALUE(1) / editor.pages) > editor.page) editor.page += (editor.rowoff+N_OR_DEFAULT_VALUE(1)) / editor.pages; // TODO: No, non funziona cosi' devo modificare l'rowoff in questo caso
-    //if (editor.cy == editor.screenrows-1 && editor.page != editor.pages-1) editor.rowoff++; // TODO: gestisci meglio
-    if (editor.cy < editor.screenrows-N_OR_DEFAULT_VALUE(0)-1) editor.cy += N_OR_DEFAULT_VALUE(1); 
+    //if ((editor.rowoff+N_OR_DEFAULT(1) / editor.pages) > editor.page) editor.page += (editor.rowoff+N_OR_DEFAULT(1)) / editor.pages; // TODO: No, non funziona cosi' devo modificare l'rowoff in questo caso
+    if (editor.cy == editor.screenrows-1 && editor.page != editor.pages-1) editor.rowoff++; // TODO: deve cambiare anche la pagina
+    if (editor.cy < editor.screenrows-N_OR_DEFAULT(0)-1) editor.cy += N_OR_DEFAULT(1); 
     else editor.cy = editor.screenrows-1;
-    //if (editor.rowoff < editor.rows.count-N_OR_DEFAULT_VALUE(0)-1) editor.rowoff += N_OR_DEFAULT_VALUE(1); 
+    //if (editor.rowoff < editor.rows.count-N_OR_DEFAULT(0)-1) editor.rowoff += N_OR_DEFAULT(1); 
     //else editor.rowoff = editor.rows.count-1;
 }
 
 // TODO: now it's trivial
 void move_cursor_left()
 {
-    if (editor.cx > N_OR_DEFAULT_VALUE(0)) editor.cx -= N_OR_DEFAULT_VALUE(1);
+    if (editor.cx > N_OR_DEFAULT(0)) editor.cx -= N_OR_DEFAULT(1);
     else editor.cx = 0;
 }
 
 // TODO: now it's trivial
 void move_cursor_right()
 {
-    if (editor.cx < editor.screencols-N_OR_DEFAULT_VALUE(0)-1) editor.cx += N_OR_DEFAULT_VALUE(1);
+    if (editor.cx < editor.screencols-N_OR_DEFAULT(0)-1) editor.cx += N_OR_DEFAULT(1);
     else editor.cx = editor.screencols-1;
 }
 
-//void scroll_up() // TODO: aggiornare current row e cy
-//{ 
-//    if (editor.rowoff > N_OR_DEFAULT_VALUE(0)) editor.rowoff -= N_OR_DEFAULT_VALUE(1);
-//}             
+void scroll_up() // TODO: cy va oltre
+{ 
+    if (editor.rowoff > N_OR_DEFAULT(0)) {
+        editor.rowoff -= N_OR_DEFAULT(1);
+        editor.cy += N_OR_DEFAULT(1);
+    } else editor.rowoff = 0;
+}             
 
-//void scroll_down() // TODO: aggiornare current row e cy
-//{
-//    if (editor.rowoff < editor.rows.count-N_OR_DEFAULT_VALUE(0)-1) editor.rowoff += N_OR_DEFAULT_VALUE(1);
-//}
-
-//void move_page_up()
-//{
-//    if (editor.page > N_OR_DEFAULT_VALUE(0)) editor.page -= N_OR_DEFAULT_VALUE(1);
-//    else editor.page = 0;
-//    editor.rowoff = editor.page*editor.pages + editor.cy;
-//}             
-
-//void move_page_down()
-//{
-//    if (editor.page < editor.pages-N_OR_DEFAULT_VALUE(0)-1) editor.page += N_OR_DEFAULT_VALUE(1);
-//    else editor.page = editor.pages-1;
-//    editor.rowoff = editor.page*editor.pages + editor.cy;
-//}           
-
-//void move_cursor_begin_of_screen()
-//{
-//    editor_set_statusmsg("TODO: move_cursor_begin_of_screen");
-//}        
-
-//void move_cursor_end_of_screen() 
-//{
-//    editor_set_statusmsg("TODO: move_cursor_end_of_screen");
-//}
-
-//void move_cursor_begin_of_file()
-//{
-//    editor.page = 0;
-//    editor.rowoff = 0;
-//    editor.cy = 0;
-//}        
-
-//void move_cursor_end_of_file() 
-//{
-//    editor.page = editor.pages-1;
-//    editor.rowoff = editor.rows.count-1;
-//    editor.cy = editor.screenrows-1;
-//}
-
-//void move_cursor_begin_of_line() { editor.cx = 0; }
-//void move_cursor_end_of_line()   { editor.cx = editor.screencols-1; }  
-
-//void move_cursor_first_non_space()
-//{
-//    Row *row = GET_CURR_ROW;
-//    char *str = row->content.items;
-//    while (*str != '\0' && isspace(*str)) {
-//        editor.cx++;
-//        str++;
-//    }
-//}
-
-//void move_cursor_last_non_space()
-//{
-//    Row *row = GET_CURR_ROW;
-//    char *str = row->content.items;
-//    size_t len = strlen(str);
-//    int i = len - 1;
-//    while (i >= 0 && isspace(str[i]))
-//        i--;
-//    editor.cx = i;
-//}
-
-char *key_to_name(char key, char *buf)
+void scroll_down() // TODO: cy fa cose strane
 {
-    if (key == ESC)       return strcpy(buf, "ESC");
-    if (key == 32)        return strcpy(buf, "SPACE");
-    if (key == BACKSPACE) return strcpy(buf, "BACKSPACE");
-    if (key == 16)        return strcpy(buf, "SHIFT?");
+    if (editor.rowoff < editor.rows.count-N_OR_DEFAULT(0)-1) {
+        editor.rowoff += N_OR_DEFAULT(1);
+        editor.cy -= N_OR_DEFAULT(1);
+    } else editor.rowoff = editor.rows.count-1;
+}
 
-    if (isgraph((unsigned char) key)) sprintf(buf, "%c", key);
+void move_page_up() // TODO: non funziona benissimo
+{
+    if (editor.page > N_OR_DEFAULT(0)) editor.page -= N_OR_DEFAULT(1);
+    else editor.page = 0;
+    editor.rowoff = editor.page*editor.screenrows + editor.cy;
+}             
+
+void move_page_down() // TODO: non funziona benissimo
+{
+    if (editor.page < editor.pages-N_OR_DEFAULT(0)-1) editor.page += N_OR_DEFAULT(1);
+    else editor.page = editor.pages-1;
+    editor.rowoff = editor.page*editor.screenrows + editor.cy;
+}           
+
+void move_cursor_begin_of_screen() { editor.cy = 0; }        
+
+void move_cursor_end_of_screen() { editor.cy = editor.screenrows-1; }
+
+void move_cursor_begin_of_file()
+{
+    editor.page = 0;
+    editor.rowoff = 0;
+    editor.cy = 0;
+}        
+
+void move_cursor_end_of_file() 
+{
+    editor.page = editor.pages-1;
+    editor.rowoff = editor.rows.count-editor.screenrows;
+    editor.cy = editor.screenrows-1;
+}
+
+void move_cursor_begin_of_line() { editor.cx = 0; }
+
+void move_cursor_end_of_line()   { editor.cx = editor.screencols-1; } // TODO: coloff
+
+void move_cursor_first_non_space()
+{
+    Row *row = CURRENT_ROW;
+    char *str = row->content.items;
+    editor.cx = 0;
+    while (*str != '\0' && isspace(*str)) {
+        editor.cx++;
+        str++;
+    }
+}
+
+void move_cursor_last_non_space()
+{
+    Row *row = CURRENT_ROW;
+    char *str = row->content.items;
+    size_t len = strlen(str);
+    if (len == 0) return;
+    int i = len - 1;
+    while (i >= 0 && isspace(str[i]))
+        i--;
+    editor.cx = (size_t)i == editor.screencols-1 ? i : i+1;
+}
+
+void key_to_name(char key, char *buf)
+{
+    if (key == ESC)       strcpy(buf, "ESC");
+    if (key == ' ')       strcpy(buf, "SPACE");
+    if (key == BACKSPACE) strcpy(buf, "BACKSPACE");
+
+    if (isgraph(key)) sprintf(buf, "%c", key);
     else sprintf(buf, "%d", key);
-    return strdup(buf);
 }
 
 void itoa(int n, char *buf)
@@ -672,10 +716,31 @@ void editor_process_key_press(void)
         editor_set_statusmsg(msg);
     } else {
         switch (key) {
-            case 'j': move_cursor_down();  break;
             case 'k': move_cursor_up();    break;
+            case 'j': move_cursor_down();  break;
             case 'h': move_cursor_left();  break;
             case 'l': move_cursor_right(); break;
+
+            case 'K': move_cursor_begin_of_screen(); break;
+            case 'J': move_cursor_end_of_screen();   break;
+            case 'H': move_cursor_first_non_space(); break;
+            case 'L': move_cursor_last_non_space();  break;
+
+            case CTRL_K: scroll_up();                          break;
+            case CTRL_J: scroll_down();                        break;
+            case CTRL_H: editor_set_statusmsg("TODO: CTRL-H"); break;
+            case CTRL_L: editor_set_statusmsg("TODO: CTRL-L"); break;
+
+            case ALT_k: move_page_up();                      break; 
+            case ALT_j: move_page_down();                    break;
+            case ALT_h: editor_set_statusmsg("TODO: ALT-h"); break;
+            case ALT_l: editor_set_statusmsg("TODO: ALT-l"); break;
+                        
+            case ALT_K: move_cursor_begin_of_file(); break;
+            case ALT_J: move_cursor_end_of_file();   break;
+            case ALT_H: move_cursor_begin_of_line(); break;
+            case ALT_L: move_cursor_end_of_line();   break; 
+
             case ENTER:
                 //editorInsertNewline();
                 editor_set_statusmsg("TODO: ENTER");
@@ -704,21 +769,14 @@ void editor_process_key_press(void)
                 //                                        ARROW_DOWN);
                 //    }
                 //    break;
-                //case ARROW_UP:
-                //case ARROW_DOWN:
-                //case ARROW_LEFT:
-                //case ARROW_RIGHT:
-                //    editorMoveCursor(c);
-                //    break;
-                //case ESC:
-                //    /* Nothing to do for ESC in this mode. */
-                //    break;
+
+            case ESC: break;
             default:
-                char key_buf[32];
-                key_to_name(key, key_buf);
-                editor_set_statusmsg("key: %s", key_buf);
-                //editorInsertChar(c);
-                break;
+                      char key_buf[32];
+                      key_to_name(key, key_buf);
+                      editor_set_statusmsg("key: %s", key_buf);
+                      //editorInsertChar(c);
+                      break;
         }
         editor.N = N_DEFAULT;
     }
@@ -736,11 +794,8 @@ int main(int argc, char **argv)
 
     log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
     editor_init();
-    log_this("size = (%zu, %zu)", editor.screenrows, editor.screencols);
     editor_open_file(filename);
-    log_this("Open file %s", editor.filename);
     enable_raw_mode();
-    editor_set_statusmsg("Pronti per cominciare");
 
     while (true) {
         editor_refresh_screen();
