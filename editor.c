@@ -1,6 +1,9 @@
 /* TODO:
-    - needs_redraw tecnology (ma prima deve funzionare tutto il resto)
+    - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
+    - fare dei config che vengono caricati all'inizio (quit_times, message_max_time...)
+    - funzioni separate per quando si scrive il comando (altrimenti non si capisce niente)
+      > cambiare anche process_pressed_key in modo da prendere solo gli input che valgono anche per il comando (altrimenti dovrei controllare in ogni funzione se si e' in_cmd e poi fare return
 
     - ref: https://viewsourcecode.org/snaptoken/kilo/index.html
 */
@@ -45,12 +48,16 @@ typedef struct
     size_t screenrows;
     size_t screencols;
     size_t page;
-    size_t pages;
     size_t quit_times;
 
-    char statusmsg[256];
-    time_t statusmsg_time;
-    time_t statusmsg_max_time;
+    //char message[256];
+    String message;
+    time_t message_time;
+    time_t message_max_time;
+
+    String cmd;
+    size_t cmd_pos;
+    bool in_cmd;
 
     int N; /* multiplicity for the command */
 } Editor;
@@ -63,7 +70,10 @@ typedef struct
 #define CURRENT_Y_POS (editor.rowoff+editor.cy) 
 #define CURRENT_X_POS (editor.coloff+editor.cx) 
 #define ROW(i) (&editor.rows.items[i])
+#define CHAR(row, i) (ROW(row)->content.items[i])
 #define CURRENT_ROW ROW(CURRENT_Y_POS)
+#define CURRENT_CHAR CHAR(CURRENT_X_POS)
+#define N_PAGES (editor.rows.count/editor.screenrows + 1)
 
 /* ANSI escape sequences */
 #define ANSI_GO_HOME_CURSOR "\x1B[H"
@@ -99,6 +109,8 @@ typedef enum
     ALT_H,
     ALT_l,
     ALT_L,
+    ALT_BACKSPACE,
+    ALT_COLON,
 } Key;
 
 
@@ -107,15 +119,6 @@ int DISCARD_CHAR_RETURN;
 Editor editor = {0};
 String screen_buf = {0};
 //////////////////////////////////////////////////
-
-void editor_set_statusmsg(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(editor.statusmsg, sizeof(editor.statusmsg), fmt, ap);
-    va_end(ap);
-    editor.statusmsg_time = time(NULL);
-}
 
 const char *logpath = "./log.txt";
 void log_this(char *format, ...)
@@ -137,6 +140,18 @@ void log_this(char *format, ...)
     fclose(logfile);
 }
 
+void set_message(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[1024] = {0};
+    vsnprintf(buf, editor.screencols, fmt, ap);
+    s_clear(&editor.message);
+    s_push_cstr(&editor.message, buf);
+    editor.message_time = time(NULL);
+    va_end(ap);
+}
+
 struct termios term_old;
 void reset_terminal(void)
 {
@@ -147,20 +162,19 @@ void reset_terminal(void)
     }
 }
 
-void editor_at_exit(void)
+void at_exit(void)
 {
     s_free(&screen_buf);
     printf(ANSI_CLEAR_SCREEN);
     printf(ANSI_GO_HOME_CURSOR);
     reset_terminal();
-    log_this("Exit");
 }
 
 bool enable_raw_mode(void)
 {
     if (editor.rawmode) return true;
     if (!isatty(STDIN_FILENO)) return false;
-    atexit(editor_at_exit);
+    atexit(at_exit);
     if (tcgetattr(STDIN_FILENO, &term_old) == -1) return false;
 
     struct termios term_raw = term_old;
@@ -169,14 +183,14 @@ bool enable_raw_mode(void)
     term_raw.c_cflag |= (CS8);
     term_raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
     term_raw.c_cc[VMIN] = 0;
-    term_raw.c_cc[VTIME] = 1; // TODO: vedere come cambia la reattività per le ALT-sequences
+    term_raw.c_cc[VTIME] = 0; // TODO: vedere come cambia la reattività per le ALT-sequences
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_raw) < 0) return false;
     editor.rawmode = true;
     return true;
 }
 
-int editor_read_key()
+int read_key()
 {
     int nread;
     char c;
@@ -193,15 +207,17 @@ int editor_read_key()
 
             if (read(STDIN_FILENO, seq+1, 1) == 0) {
                 switch (seq[0]) { /* ALT-X sequence */
-                    case 'k': return ALT_k;
-                    case 'K': return ALT_K;
-                    case 'j': return ALT_j;
-                    case 'J': return ALT_J;
-                    case 'h': return ALT_h;
-                    case 'H': return ALT_H;
-                    case 'l': return ALT_l;
-                    case 'L': return ALT_L;
-                    default : return ESC;
+                    case 'k'      : return ALT_k;
+                    case 'K'      : return ALT_K;
+                    case 'j'      : return ALT_j;
+                    case 'J'      : return ALT_J;
+                    case 'h'      : return ALT_h;
+                    case 'H'      : return ALT_H;
+                    case 'l'      : return ALT_l;
+                    case 'L'      : return ALT_L;
+                    case BACKSPACE: return ALT_BACKSPACE;
+                    case ':'      : return ALT_COLON;
+                    default       : return ESC;
                 }
             } else return ESC;
 
@@ -213,7 +229,7 @@ int editor_read_key()
             //        if (read(STDIN_FILENO, seq+2, 1) == 0) return ESC;
             //        log_this("2: %d", seq[2]);
             //        if (seq[2] == '~') {
-            //            //editor_set_statusmsg("Pressed: crazy ESC ~ sequence");
+            //            //set_message("Pressed: crazy ESC ~ sequence");
             //            log_this("Pressed: crazy ESC ~ sequence");
             //            return '\0';
             //            //switch (seq[1]) {
@@ -223,7 +239,7 @@ int editor_read_key()
             //            //}
             //        }
             //    } else {
-            //        //editor_set_statusmsg("Pressed: crazy ESC sequence");
+            //        //set_message("Pressed: crazy ESC sequence");
             //        log_this("Pressed: crazy ESC sequence");
             //        return '\0';
             //        //switch (seq[1]) {
@@ -239,7 +255,7 @@ int editor_read_key()
 
             ///* ESC O sequences. */
             //else if (seq[0] == 'O') {
-            //    //editor_set_statusmsg("Pressed: crazy ESC O sequence");
+            //    //set_message("Pressed: crazy ESC O sequence");
             //    log_this("Pressed: crazy ESC O sequence");
             //    return '\0';
             //    //switch(seq[1]) {
@@ -318,7 +334,7 @@ void update_window_size(void)
     editor.screenrows -= 2;
 }
 
-void editor_refresh_screen(void)
+void refresh_screen(void)
 {
     s_clear(&screen_buf);
     s_push_cstr(&screen_buf, ANSI_HIDE_CURSOR);
@@ -327,14 +343,14 @@ void editor_refresh_screen(void)
     Row *row;
     size_t filerow;
     for (filerow = editor.rowoff; filerow < editor.rowoff+editor.screenrows; filerow++) {
-        if (filerow >= editor.rows.count) {
+        if (filerow >= editor.rows.count) { // TODO: poi lo voglio togliere, ora lo uso per debuggare
             s_push_cstr(&screen_buf,"~" ANSI_ERASE_LINE_FROM_CURSOR CRNL);
             continue;
         }
 
         row = ROW(filerow);
 
-        size_t len = strlen(row->content.items) - editor.coloff;
+        size_t len = row->content.count - editor.coloff;
         if (len > 0) {
             if (len > editor.screencols) len = editor.screencols; // TODO: viene troncata la riga
             int c;
@@ -342,12 +358,15 @@ void editor_refresh_screen(void)
                 c = row->content.items[j];
                 if (!isprint(c)) {
                     s_push_cstr(&screen_buf, ANSI_INVERSE);
-                    s_push(&screen_buf, c <= 26 ? '@'+c : '?');
+                    if (c <= 26) {
+                        s_push(&screen_buf, '^');
+                        s_push(&screen_buf, '@'+c);
+                    } else s_push(&screen_buf, '?');
                     s_push_cstr(&screen_buf, ANSI_RESET);
                 } else s_push(&screen_buf, c);
             }
-            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
-        } else s_push_cstr(&screen_buf, CRNL);
+        }
+        s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
     }
 
     /* Create a two rows status. First row: */
@@ -367,7 +386,7 @@ void editor_refresh_screen(void)
             editor.rows.count, 
             perc_buf,
             editor.page+1,
-            editor.pages
+            N_PAGES
     ); // TODO: percentuale
     //size_t len = snprintf(status, sizeof(status), "%.20s - %zu lines %s",
     //                      editor.filename, editor.rows.count, editor.dirty ? "(modified)" : "");
@@ -387,28 +406,37 @@ void editor_refresh_screen(void)
     s_push(&screen_buf, ' ');
     s_push_cstr(&screen_buf, ANSI_RESET CRNL);
 
-    /* Second row depends on editor.statusmsg and the status message update time. */
+    /* Second row depends on editor.message and the message remaining time. */
     s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR);
-    size_t msglen = strlen(editor.statusmsg);
-    if (msglen && time(NULL)-editor.statusmsg_time < 3) // TODO: make 3 a variable, max seconds to show the msg
-        s_push_str(&screen_buf, editor.statusmsg, msglen <= editor.screencols ? msglen : editor.screencols);
+    if (editor.in_cmd) {
+        s_push_cstr(&screen_buf, "Command: ");
+        s_push_str(&screen_buf, editor.cmd.items, editor.cmd.count);
+    } else {
+        size_t msglen = editor.message.count;
+        if (msglen && time(NULL)-editor.message_time < 3) // TODO: make 3 a variable, max seconds to show the msg
+            s_push_str(&screen_buf, editor.message.items, msglen);
+    }
 
     /* Put cursor at its current position. Note that the horizontal position
      * at which the cursor is displayed may be different compared to 'editor.cx'
      * because of TABs. */
-    size_t j;
-    size_t cx = 1;
-    filerow = CURRENT_Y_POS;
-    row = (filerow >= editor.rows.count) ? NULL : ROW(filerow);
-    if (row) {
-        size_t rowlen = strlen(row->content.items);
-        for (j = editor.coloff; j < (editor.cx+editor.coloff); j++) {
-            if (j < rowlen && row->content.items[j] == TAB) cx += 7-((cx)%8);
-            cx++;
+    size_t cx = editor.cx+1;
+    size_t cy = editor.cy+1;
+    if (editor.in_cmd) {
+        cx = strlen("Command: ")+editor.cmd_pos+1;
+        cy = editor.screencols-1;
+    } else {
+        filerow = CURRENT_Y_POS;
+        if (filerow < editor.rows.count) {
+            Row *row = ROW(filerow);
+            size_t rowlen = strlen(row->content.items);
+            for (size_t j = editor.coloff; j < (CURRENT_X_POS); j++) {
+                if (j < rowlen && row->content.items[j] == TAB) cx += 4;
+            }
         }
     }
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%zu;%zuH", editor.cy+1, cx);
+    snprintf(buf, sizeof(buf), "\x1b[%zu;%zuH", cy, cx);
     s_push_str(&screen_buf, buf, strlen(buf));
 
     s_push_cstr(&screen_buf, ANSI_SHOW_CURSOR);
@@ -424,10 +452,10 @@ void handle_sigwinch(int signo)
     update_window_size();
     if (editor.cy > editor.screenrows) editor.cy = editor.screenrows - 1;
     if (editor.cx > editor.screencols) editor.cx = editor.screencols - 1;
-    editor_refresh_screen();
+    refresh_screen();
 }
 
-void editor_init()
+void init()
 {
     screen_buf = (String){0};
     da_default(&screen_buf);
@@ -445,12 +473,16 @@ void editor_init()
     editor.rowoff = 0;
     editor.coloff = 0;
     editor.page = 0;
-    editor.pages = 0;
     editor.quit_times = QUIT_DEFAULT;
 
-    memset(editor.statusmsg, 0, sizeof(editor.statusmsg));
-    editor.statusmsg_time = (time_t)0;
-    editor.statusmsg_max_time = (time_t)3;
+    editor.cmd = (String){0};
+    da_default(&editor.cmd);
+    editor.cmd_pos = 0;
+    editor.in_cmd = false;
+
+    da_default(&editor.message);
+    editor.message_time = (time_t)0;
+    editor.message_max_time = (time_t)3;
 
     editor.N = N_DEFAULT;
 
@@ -458,11 +490,10 @@ void editor_init()
     signal(SIGWINCH, handle_sigwinch);
 }
 
-void editor_open_file(char *filename)
+void open_file(char *filename)
 {
     if (editor.filename) free(editor.filename);
     da_clear(&editor.rows);
-    editor.pages = 0;
 
     if (filename == NULL) {
         editor.filename = strdup("new");
@@ -487,10 +518,8 @@ void editor_open_file(char *filename)
         Row row = {0};
         da_default(&row.content);
         s_push_str(&row.content, line, strlen(line)-1);
-        s_push_null(&row.content);
         da_push(&editor.rows, row);
     }
-    editor.pages = editor.rows.count / editor.screenrows;
     free(line);
 }
 
@@ -549,8 +578,8 @@ void move_cursor_up()
 // TODO: now it's trivial
 void move_cursor_down()
 { 
-    //if ((editor.rowoff+N_OR_DEFAULT(1) / editor.pages) > editor.page) editor.page += (editor.rowoff+N_OR_DEFAULT(1)) / editor.pages; // TODO: No, non funziona cosi' devo modificare l'rowoff in questo caso
-    if (editor.cy == editor.screenrows-1 && editor.page != editor.pages-1) editor.rowoff++; // TODO: deve cambiare anche la pagina
+    //if ((editor.rowoff+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.rowoff+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'rowoff in questo caso
+    if (editor.cy == editor.screenrows-1 && editor.page != N_PAGES-1) editor.rowoff++; // TODO: deve cambiare anche la pagina
     if (editor.cy < editor.screenrows-N_OR_DEFAULT(0)-1) editor.cy += N_OR_DEFAULT(1); 
     else editor.cy = editor.screenrows-1;
     //if (editor.rowoff < editor.rows.count-N_OR_DEFAULT(0)-1) editor.rowoff += N_OR_DEFAULT(1); 
@@ -560,15 +589,25 @@ void move_cursor_down()
 // TODO: now it's trivial
 void move_cursor_left()
 {
-    if (editor.cx > N_OR_DEFAULT(0)) editor.cx -= N_OR_DEFAULT(1);
-    else editor.cx = 0;
+    if (editor.in_cmd) {
+        if (editor.cmd_pos > N_OR_DEFAULT(0)) editor.cmd_pos -= N_OR_DEFAULT(1);
+        else editor.cmd_pos = 0;
+    } else {
+        if (editor.cx > N_OR_DEFAULT(0)) editor.cx -= N_OR_DEFAULT(1);
+        else editor.cx = 0;
+    }
 }
 
 // TODO: now it's trivial
 void move_cursor_right()
 {
-    if (editor.cx < editor.screencols-N_OR_DEFAULT(0)-1) editor.cx += N_OR_DEFAULT(1);
-    else editor.cx = editor.screencols-1;
+    if (editor.in_cmd) {
+        if (editor.cmd_pos < editor.cmd.count-N_OR_DEFAULT(0)-1) editor.cmd_pos += N_OR_DEFAULT(1);
+        else editor.cmd_pos = editor.cmd.count;
+    } else {
+        if (editor.cx < editor.screencols-N_OR_DEFAULT(0)-1) editor.cx += N_OR_DEFAULT(1);
+        else editor.cx = editor.screencols-1;
+    }
 }
 
 void scroll_up() // TODO: cy va oltre
@@ -596,8 +635,8 @@ void move_page_up() // TODO: non funziona benissimo
 
 void move_page_down() // TODO: non funziona benissimo
 {
-    if (editor.page < editor.pages-N_OR_DEFAULT(0)-1) editor.page += N_OR_DEFAULT(1);
-    else editor.page = editor.pages-1;
+    if (editor.page < N_PAGES-N_OR_DEFAULT(0)-1) editor.page += N_OR_DEFAULT(1);
+    else editor.page = N_PAGES-1;
     editor.rowoff = editor.page*editor.screenrows + editor.cy;
 }           
 
@@ -614,7 +653,7 @@ void move_cursor_begin_of_file()
 
 void move_cursor_end_of_file() 
 {
-    editor.page = editor.pages-1;
+    editor.page = N_PAGES-1;
     editor.rowoff = editor.rows.count-editor.screenrows;
     editor.cy = editor.screenrows-1;
 }
@@ -646,16 +685,6 @@ void move_cursor_last_non_space()
     editor.cx = (size_t)i == editor.screencols-1 ? i : i+1;
 }
 
-void key_to_name(char key, char *buf)
-{
-    if (key == ESC)       strcpy(buf, "ESC");
-    if (key == ' ')       strcpy(buf, "SPACE");
-    if (key == BACKSPACE) strcpy(buf, "BACKSPACE");
-
-    if (isgraph(key)) sprintf(buf, "%c", key);
-    else sprintf(buf, "%d", key);
-}
-
 void itoa(int n, char *buf)
 {
     if (n == 0) {
@@ -673,17 +702,17 @@ void itoa(int n, char *buf)
     for (int i = 0; i < len; i++) buf[i] = tmp[len-i-1];
 }
 
-bool editor_save(void)
+bool save(void)
 {
     String save_buf = {0};
     da_default(&save_buf);
     // TODO: build save_buf from editor.rows
+    Row *row;
     for (size_t i = 0; i < editor.rows.count; i++) {
-        Row *row = ROW(i);
-        s_push_str(&save_buf, row->content.items, strlen(row->content.items));
+        row = ROW(i);
+        s_push_str(&save_buf, row->content.items, row->content.count);
         s_push(&save_buf, '\n');
     }
-    s_push_null(&save_buf);
 
     // TODO: make the user decide, in the status line, the name of the file if not set
     int fd = open(editor.filename, O_RDWR|O_CREAT, 0644);
@@ -691,89 +720,213 @@ bool editor_save(void)
 
     /* Use truncate + a single write(2) call in order to make saving
      * a bit safer, under the limits of what we can do in a small editor. */
-    size_t len = strlen(save_buf.items);
+    ssize_t len = save_buf.count;
     if (ftruncate(fd, len) == -1) goto writeerr;
-    if (write(fd, save_buf.items, len) != (ssize_t)len) goto writeerr;
+    if (write(fd, save_buf.items, len) != len) goto writeerr;
 
     close(fd);
     s_free(&save_buf);
     editor.dirty = 0;
-    editor_set_statusmsg("%zu bytes written on disk", len);
+    set_message("%zu bytes written on disk", len);
     return 0;
 
 writeerr:
     s_free(&save_buf);
     if (fd != -1) close(fd);
-    editor_set_statusmsg("Can't save! I/O error: %s", strerror(errno));
+    set_message("Can't save! I/O error: %s", strerror(errno));
     return 1;
 }
 
-bool editor_quit(void)
+bool quit(void)
 {
     if (editor.dirty && editor.quit_times) {
-        editor_set_statusmsg("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.quit_times, editor.quit_times == 1 ? "" : "s");
+        set_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.quit_times, editor.quit_times == 1 ? "" : "s");
         editor.quit_times--;
         return false;
     }
     return true;
 }
 
-// TODO: make bound checks
-void editor_insert_row(size_t at, Row row)
+void insert_char_at(Row *row, size_t at, int c)
 {
-    if (da_is_empty(editor.rows)) {
-        da_push(&editor.rows, row);
-    } else {
-        da_insert(&editor.rows, row, (int)at);
-    }
-    editor.dirty++;
-}
-
-void editor_insert_char_at(Row *row, size_t at, int c) {
-    if (at >= row->content.count) {
+    if (at > row->content.count) {
         size_t padlen = at-row->content.count;
-        if (row->content.count > 0) {
-            da_pop(&row->content, DISCARD_CHAR_RETURN); // pop '\0' // TODO: forse coviene non averlo (oppure devo capire se figura nel count) [probabilmente ci sta tenerlo]
-        }
-        for (size_t i = 0; i <= padlen; i++)
-            s_push(&row->content, ' ');
-        s_push(&row->content, c);
-        s_push_null(&row->content);
+        for (size_t i = 0; i < padlen; i++)
+            da_push(&row->content, ' ');
+        da_push(&row->content, c);
     } else {
-        if (row->content.count == 0) {
-            da_push(&row->content, c);
-            s_push_null(&row->content);
-        } else {
-            da_insert(&row->content, c, (int)at);
-        }
+        da_insert(&row->content, c, (int)at);
+        //if (row->content.count == 0) { // TODO: qui si puo' fare solo insert?
+        //    da_push(&row->content, c);
+        //} else {
+        //    da_insert(&row->content, c, (int)at);
+        //}
     }
-    editor.dirty++;
 }
 
-void editor_insert_char(char c)
+typedef enum
 {
-    size_t filerow = CURRENT_Y_POS;
-    size_t filecol = editor.coloff+editor.cx;
-    Row *row = (filerow >= editor.rows.count) ? NULL : CURRENT_ROW;
+    CMD_NULL,
+    UNKNOWN,
+    MOVE_LINE_UP,
+    MOVE_LINE_DOWN,
+    CMDS_COUNT
+} Command;
 
-    if (!row) {
-        while (editor.rows.count <= filerow) {
+void execute_cmd()
+{
+    static_assert(CMDS_COUNT == 4, "Implement command in execute_cmd");
+    set_message("TODO: parse and execute command `%s`", editor.cmd.items);
+}
+
+void insert_char(char c)
+{
+    if (editor.in_cmd) {
+        if (c == '\n') {
+            s_push_null(&editor.cmd);
+            editor.in_cmd = false;
+            execute_cmd();
+        } else {
+            da_insert(&editor.cmd, c, (int)(editor.cmd_pos));
+            editor.cmd_pos++;
+        }
+        return;
+    }
+
+    size_t y = CURRENT_Y_POS;
+    size_t x = CURRENT_X_POS;
+
+    if (c == '\n') {
+        if (y == editor.rows.count) {
             Row newrow = {0};
             da_default(&newrow.content);
-            editor_insert_row(editor.rows.count-1, newrow);
+            da_push(&editor.rows, newrow);
+        } else {
+            Row *row = CURRENT_ROW;
+            if (x >= row->content.count) x = row->content.count;
+            if (x == 0) {
+                Row newrow = {0};
+                da_default(&newrow.content);
+                da_insert(&editor.rows, newrow, (int)y);
+            } else {
+                /* We are in the middle of a line. Split it between two rows. */
+                Row newrow = {0};
+                da_default(&newrow.content);
+                s_push_str(&newrow.content, row->content.items+x, row->content.count-x);
+                da_insert(&editor.rows, newrow, (int)y+1);
+                row->content.count = x;
+            }
         }
-        row = CURRENT_ROW;
+        if (editor.cy == editor.screenrows-1) editor.rowoff++;
+        else editor.cy++;
+        editor.cx = 0;
+        editor.coloff = 0;
+    } else {
+        if (y >= editor.rows.count) {
+            while (editor.rows.count <= y) {
+                Row newrow = {0};
+                da_default(&newrow.content);
+                da_push(&editor.rows, newrow);
+            }
+        }
+        insert_char_at(CURRENT_ROW, x, c);
+        if (editor.cx == editor.screencols-1) editor.coloff++; // TODO: funzione/macro per `editor.cx == editor.screencols-1`
+        else editor.cx++;
+        editor.dirty++;
     }
-    editor_insert_char_at(row, filecol, c);
-    if (editor.cx == editor.screencols-1) editor.coloff++;
-    else editor.cx++;
+}
+
+void insert_newline_and_keep_pos()
+{
+    set_message("TODO: insert_newline_and_keep_pos");
+}
+
+void delete_char_at(Row *row, size_t at)
+{
+    if (row->content.count <= at) return;
+    da_remove(&row->content, (int)at, DISCARD_CHAR_RETURN);
+}
+
+void delete_char()
+{
+    if (editor.in_cmd) {
+        if (editor.cmd.count <= 0) return;
+        if (editor.cmd_pos == 0) return;
+        da_remove(&editor.cmd, (int)editor.cmd_pos-1, DISCARD_CHAR_RETURN);
+        editor.cmd_pos--;
+        return;
+    }
+
+    size_t y = CURRENT_Y_POS;
+    size_t x = CURRENT_X_POS;
+    Row *row = (y >= editor.rows.count) ? NULL : CURRENT_ROW;
+    if (!row || (x == 0 && y == 0)) return;
+    if (x == 0) {
+        /* Handle the case of column 0, we need to move the current line
+         * on the right of the previous one. */
+        Row *prev = ROW(y-1);
+        x = prev->content.count;
+        s_push_str(&prev->content, row->content.items, row->content.count);
+        Row _;
+        (void)_;
+        da_remove(&editor.rows, (int)y, _);
+        if (editor.cy == 0) editor.rowoff--;
+        else editor.cy--;
+        editor.cx = x;
+        if (editor.cx >= editor.screencols) {
+            int shift = (editor.screencols-editor.cx)+1;
+            editor.cx -= shift;
+            editor.coloff += shift;
+        }
+    } else {
+        delete_char_at(row, x-1);
+        if (editor.cx == 0 && editor.coloff) editor.coloff--;
+        else editor.cx--;
+    }
     editor.dirty++;
 }
 
-// TODO: process number as in process_key
-void editor_process_key_press(void)
+void delete_word()
 {
-    int key = editor_read_key();
+    if (editor.in_cmd) {
+        while (editor.cmd_pos > 0 && isspace(editor.cmd.items[editor.cmd_pos])) {
+            da_remove(&editor.cmd, (int)editor.cmd_pos-1, DISCARD_CHAR_RETURN);
+            editor.cmd_pos--;
+        }
+        while (editor.cmd_pos > 0 && !isspace(editor.cmd.items[editor.cmd_pos])) {
+            da_remove(&editor.cmd, (int)editor.cmd_pos-1, DISCARD_CHAR_RETURN);
+            editor.cmd_pos--;
+        }
+        return;
+    }
+
+    size_t y = CURRENT_Y_POS;
+    if (y >= editor.rows.count) return;
+    size_t x = CURRENT_X_POS;
+    if (x == 0 && y == 0) return;
+    Row *row = CURRENT_ROW;
+    while (x > 0 && isspace(CHAR(CURRENT_Y_POS, x))) {
+        delete_char_at(row, x-1);
+        x--;
+        editor.cx--;
+    }
+    while (x > 0 && !isspace(CHAR(CURRENT_Y_POS, x))) {
+        delete_char_at(row, x-1);
+        x--;
+        editor.cx--;
+    }
+}
+
+void command()
+{
+    s_clear(&editor.cmd);
+    editor.cmd_pos = 0;
+    editor.in_cmd = true;
+}
+
+void process_pressed_key(void)
+{
+    int key = read_key();
 
     if (isdigit(key)) {
         if (editor.N == N_DEFAULT) {
@@ -789,47 +942,56 @@ void editor_process_key_press(void)
         itoa(editor.N, bufN);
         char msg[64];
         sprintf(msg, "number: %s", bufN);
-        editor_set_statusmsg(msg);
+        set_message(msg);
     } else {
         switch (key) {
-            case 'k': move_cursor_up();    break;
-            case 'j': move_cursor_down();  break;
-            case 'h': move_cursor_left();  break;
-            case 'l': move_cursor_right(); break;
+            case ALT_k: move_cursor_up();    break;
+            case ALT_j: move_cursor_down();  break;
+            case ALT_h: move_cursor_left();  break;
+            case ALT_l: move_cursor_right(); break;
 
-            case 'K': move_cursor_begin_of_screen(); break;
-            case 'J': move_cursor_end_of_screen();   break;
-            case 'H': move_cursor_first_non_space(); break;
-            case 'L': move_cursor_last_non_space();  break;
+            case ALT_K: move_cursor_begin_of_screen(); break;
+            case ALT_J: move_cursor_end_of_screen();   break;
+            case ALT_H: move_cursor_first_non_space(); break;
+            case ALT_L: move_cursor_last_non_space();  break;
 
-            case CTRL_K: scroll_up();                          break;
-            case CTRL_J: scroll_down();                        break;
-            case CTRL_H: editor_set_statusmsg("TODO: CTRL-H"); break;
-            case CTRL_L: editor_set_statusmsg("TODO: CTRL-L"); break;
+            //case CTRL_K: scroll_up();                          break;
+            //case CTRL_J: scroll_down();                        break;
+            //case CTRL_H: set_message("TODO: CTRL-H"); break;
+            //case CTRL_L: set_message("TODO: CTRL-L"); break;
 
-            case ALT_k: move_page_up();                      break; 
-            case ALT_j: move_page_down();                    break;
-            case ALT_h: editor_set_statusmsg("TODO: ALT-h"); break;
-            case ALT_l: editor_set_statusmsg("TODO: ALT-l"); break;
-                        
-            case ALT_K: move_cursor_begin_of_file(); break;
-            case ALT_J: move_cursor_end_of_file();   break;
-            case ALT_H: move_cursor_begin_of_line(); break;
-            case ALT_L: move_cursor_end_of_line();   break; 
+            //case ALT_k: move_page_up();                      break; 
+            //case ALT_j: move_page_down();                    break;
+            //case ALT_h: set_message("TODO: ALT-h"); break;
+            //case ALT_l: set_message("TODO: ALT-l"); break;
+            //            
+            //case ALT_K: move_cursor_begin_of_file(); break;
+            //case ALT_J: move_cursor_end_of_file();   break;
+            //case ALT_H: move_cursor_begin_of_line(); break;
+            //case ALT_L: move_cursor_end_of_line();   break; 
 
-            case ENTER:
-                //editorInsertNewline();
-                editor_set_statusmsg("TODO: ENTER");
+            case ALT_COLON: command(); break;
+            case ALT_BACKSPACE: delete_word(); break;
+
+            case TAB:
+                if (editor.in_cmd) {
+                    // TODO: autocomplete command
+                } else {
+                    set_message("TODO: insert TAB");
+                    //insert_char('\t');
+                }
+                break;
+            case ENTER: // TODO: se si e' in_cmd si esegue execute_cmd (che fa anche il resto)
+                insert_char('\n');
                 break;
             case CTRL_Q:
-                if (editor_quit()) exit(0);
+                if (quit()) exit(0);
                 else return;
             case CTRL_S:
-                editor_save();
+                save();
                 break;
             case BACKSPACE:
-                editor_set_statusmsg("TODO: BACKSPACE");
-                //editorDelChar();
+                delete_char();
                 break;
                 //case PAGE_UP:
                 //case PAGE_DOWN:
@@ -845,9 +1007,11 @@ void editor_process_key_press(void)
                 //    }
                 //    break;
 
-            case ESC: break;
+            case ESC:
+                if (editor.in_cmd) editor.in_cmd = false;
+                break;
             default:
-                editor_insert_char(key);
+                if (isprint(key)) insert_char(key);
                 break;
         }
         editor.N = N_DEFAULT;
@@ -865,13 +1029,13 @@ int main(int argc, char **argv)
     char *filename = argc == 2 ? argv[1] : NULL;
 
     log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
-    editor_init();
-    editor_open_file(filename);
+    init();
+    open_file(filename);
     enable_raw_mode();
 
     while (true) {
-        editor_refresh_screen();
-        editor_process_key_press();
+        refresh_screen();
+        process_pressed_key();
     }
 
     return 0;

@@ -1,5 +1,6 @@
+int main(void)
+{
 
-
-
-
-cosa stai esy irnnon capisco
+    printf("Hello, World!");
+    return ;
+}
