@@ -2,8 +2,13 @@
     - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
     - fare dei config che vengono caricati all'inizio (quit_times, message_max_time...)
+      > possibilita' di definire nel config file nuovi comandi come composizioni di quelli builtin (4 lu ld significa 4 volte lu poi ld, o pensare ad un'altra sintassi)
+      > possibilita' di assegnare comandi a combinazioni di tasti (questo sembra essere molto difficile, non ho idea di come si possa fare)
+      > fare i comandi per le azioni base (salva, esci, spostati, ecc...)
+    - sistema di registrazione macro (a cui magari si puo' dare un nome e le si esegue come comandi o con shortcut)
     - funzioni separate per quando si scrive il comando (altrimenti non si capisce niente)
       > cambiare anche process_pressed_key in modo da prendere solo gli input che valgono anche per il comando (altrimenti dovrei controllare in ogni funzione se si e' in_cmd e poi fare return
+    - gestire con max_int o come si chiama il limite di editor.N
 
     - ref: https://viewsourcecode.org/snaptoken/kilo/index.html
 */
@@ -25,6 +30,9 @@
 #include "../libs/strings.h"
 
 #define DEBUG true
+
+bool streq(const char *s1, const char *s2) { return strcmp(s1, s2) == 0; }
+bool strneq(const char *s1, const char *s2, size_t n) { return strncmp(s1, s2, n) == 0; }
 
 typedef struct
 {
@@ -64,6 +72,8 @@ typedef struct
 
 #define N_DEFAULT -1 
 #define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
+#define N_TIMES for (size_t i = 0; i < N_OR_DEFAULT(1); i++)
+
 #define QUIT_DEFAULT 3
 
 #define CRNL "\r\n"
@@ -101,7 +111,18 @@ typedef enum
     ESC       = 27,
     BACKSPACE = 127,
 
-    ALT_k     = 1000,
+    ALT_0     = 1000,
+    ALT_1,
+    ALT_2,
+    ALT_3,
+    ALT_4,
+    ALT_5,
+    ALT_6,
+    ALT_7,
+    ALT_8,
+    ALT_9, // NOTE: ALT_digit sequences must be 1000+digit
+
+    ALT_k,
     ALT_K,
     ALT_j,
     ALT_J,
@@ -109,6 +130,7 @@ typedef enum
     ALT_H,
     ALT_l,
     ALT_L,
+
     ALT_BACKSPACE,
     ALT_COLON,
 } Key;
@@ -207,6 +229,17 @@ int read_key()
 
             if (read(STDIN_FILENO, seq+1, 1) == 0) {
                 switch (seq[0]) { /* ALT-X sequence */
+                    case '0'      : return ALT_0;
+                    case '1'      : return ALT_1;
+                    case '2'      : return ALT_2;
+                    case '3'      : return ALT_3;
+                    case '4'      : return ALT_4;
+                    case '5'      : return ALT_5;
+                    case '6'      : return ALT_6;
+                    case '7'      : return ALT_7;
+                    case '8'      : return ALT_8;
+                    case '9'      : return ALT_9;
+
                     case 'k'      : return ALT_k;
                     case 'K'      : return ALT_K;
                     case 'j'      : return ALT_j;
@@ -379,30 +412,26 @@ void refresh_screen(void)
     else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
 
     char status[80];
-    size_t len = snprintf(status, sizeof(status), " %s - (%zu, %zu) - %zu lines (%s) - [page %zu/%zu]", 
+    size_t len = snprintf(status, sizeof(status), " %s %c (%zu, %zu) | %zu lines (%s) | page %zu/%zu", 
             editor.filename == NULL ? "unnamed" : editor.filename, 
+            editor.dirty ? '+' : '-',
             editor.cx+1, 
             CURRENT_Y_POS+1, 
             editor.rows.count, 
             perc_buf,
             editor.page+1,
             N_PAGES
-    ); // TODO: percentuale
-    //size_t len = snprintf(status, sizeof(status), "%.20s - %zu lines %s",
-    //                      editor.filename, editor.rows.count, editor.dirty ? "(modified)" : "");
-    char rstatus[80];
-    size_t rlen = snprintf(rstatus, sizeof(rstatus), "%zu/%zu", CURRENT_Y_POS+1, editor.rows.count);
+    );
     if (len > editor.screencols) len = editor.screencols;
     s_push_str(&screen_buf, status, len);
-    while (len < editor.screencols) {
-        if (editor.screencols - (len+1) == rlen) {
-            break;
-        } else {
-            s_push(&screen_buf, ' ');
-            len++;
-        }
+
+    char rstatus[80];
+    size_t rlen = editor.N == N_DEFAULT ? 0 : snprintf(rstatus, sizeof(rstatus), "%d", editor.N);
+    while (len < editor.screencols && editor.screencols - (len+1) != rlen) {
+        s_push(&screen_buf, ' ');
+        len++;
     }
-    s_push_str(&screen_buf, rstatus, rlen);
+    if (editor.N != N_DEFAULT) s_push_str(&screen_buf, rstatus, rlen);
     s_push(&screen_buf, ' ');
     s_push_cstr(&screen_buf, ANSI_RESET CRNL);
 
@@ -455,7 +484,34 @@ void handle_sigwinch(int signo)
     refresh_screen();
 }
 
-void init()
+#define CONFIG_PATH "/home/mathieu/.config/editor/config"
+void load_config()
+{
+    FILE *config_file = fopen(CONFIG_PATH, "r");
+    if (config_file == NULL) {
+        printf("Config file not found at " CONFIG_PATH "\n");
+        printf("Loading default config file.\n");
+        printf("\n-- Press any key to continue --\n");
+        getc(stdin);
+        // TODO: copy default_config file (provided in the repo) to CONFIG_PATH
+        return;
+    }
+
+    // TODO
+    ssize_t res; 
+    size_t len;
+    char *line = NULL;
+    int i = 0;
+    while ((res = getline(&line, &len, config_file)) != -1) {
+        i++;
+        printf("%d. `%s`", i, line);
+    }
+    free(line);
+    printf("\n-- Press any key to continue --\n");
+    getc(stdin);
+}
+
+void initialize()
 {
     screen_buf = (String){0};
     da_default(&screen_buf);
@@ -569,7 +625,7 @@ void open_file(char *filename)
 void move_cursor_up() 
 {
     if (editor.cy == 0 && editor.page != 0) editor.rowoff--; // TODO: deve cambiare anche la pagina
-    if (editor.cy > N_OR_DEFAULT(0)) editor.cy -= N_OR_DEFAULT(1);
+    if (editor.cy > 0) editor.cy -= 1;
     else editor.cy = 0;
     //if (editor.rowoff > N_OR_DEFAULT(0)) editor.rowoff -= N_OR_DEFAULT(1);
     //else editor.rowoff = 0;
@@ -580,7 +636,7 @@ void move_cursor_down()
 { 
     //if ((editor.rowoff+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.rowoff+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'rowoff in questo caso
     if (editor.cy == editor.screenrows-1 && editor.page != N_PAGES-1) editor.rowoff++; // TODO: deve cambiare anche la pagina
-    if (editor.cy < editor.screenrows-N_OR_DEFAULT(0)-1) editor.cy += N_OR_DEFAULT(1); 
+    if (editor.cy < editor.screenrows-1) editor.cy += 1; 
     else editor.cy = editor.screenrows-1;
     //if (editor.rowoff < editor.rows.count-N_OR_DEFAULT(0)-1) editor.rowoff += N_OR_DEFAULT(1); 
     //else editor.rowoff = editor.rows.count-1;
@@ -590,10 +646,10 @@ void move_cursor_down()
 void move_cursor_left()
 {
     if (editor.in_cmd) {
-        if (editor.cmd_pos > N_OR_DEFAULT(0)) editor.cmd_pos -= N_OR_DEFAULT(1);
+        if (editor.cmd_pos > 0) editor.cmd_pos -= 1;
         else editor.cmd_pos = 0;
     } else {
-        if (editor.cx > N_OR_DEFAULT(0)) editor.cx -= N_OR_DEFAULT(1);
+        if (editor.cx > 0) editor.cx -= 1;
         else editor.cx = 0;
     }
 }
@@ -602,10 +658,10 @@ void move_cursor_left()
 void move_cursor_right()
 {
     if (editor.in_cmd) {
-        if (editor.cmd_pos < editor.cmd.count-N_OR_DEFAULT(0)-1) editor.cmd_pos += N_OR_DEFAULT(1);
+        if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos += 1;
         else editor.cmd_pos = editor.cmd.count;
     } else {
-        if (editor.cx < editor.screencols-N_OR_DEFAULT(0)-1) editor.cx += N_OR_DEFAULT(1);
+        if (editor.cx < editor.screencols-1) editor.cx += 1;
         else editor.cx = editor.screencols-1;
     }
 }
@@ -766,17 +822,54 @@ void insert_char_at(Row *row, size_t at, int c)
 
 typedef enum
 {
-    CMD_NULL,
     UNKNOWN,
     MOVE_LINE_UP,
     MOVE_LINE_DOWN,
     CMDS_COUNT
 } Command;
 
+Command parse_cmd()
+{
+    char *cmd = editor.cmd.items;
+    static_assert(CMDS_COUNT == 3, "Parse all commands in parse_cmd");
+    if      (streq(cmd, "lu")) return MOVE_LINE_UP;
+    else if (streq(cmd, "ld")) return MOVE_LINE_DOWN;
+    else                       return UNKNOWN;
+}
+
+void move_line_up()
+{
+    size_t y = CURRENT_Y_POS;
+    if (y == 0) return;
+    Row tmp = editor.rows.items[y];
+    editor.rows.items[y] = editor.rows.items[y-1];
+    editor.rows.items[y-1] = tmp;
+    editor.cy--;
+}
+
+void move_line_down()
+{
+    size_t y = CURRENT_Y_POS;
+    if (y == editor.screenrows-1) return;
+    Row tmp = editor.rows.items[y];
+    editor.rows.items[y] = editor.rows.items[y+1];
+    editor.rows.items[y+1] = tmp;
+    editor.cy++;
+}
+
 void execute_cmd()
 {
-    static_assert(CMDS_COUNT == 4, "Implement command in execute_cmd");
-    set_message("TODO: parse and execute command `%s`", editor.cmd.items);
+    static_assert(CMDS_COUNT == 3, "Implement all commands in execute_cmd");
+    Command cmd = parse_cmd();
+    switch (cmd)
+    {
+        case MOVE_LINE_UP  : N_TIMES move_line_up();   break;
+        case MOVE_LINE_DOWN: N_TIMES move_line_down(); break;
+
+        case UNKNOWN:
+        default:
+            set_message("Unknown command `%s`", editor.cmd.items); 
+    }
 }
 
 void insert_char(char c)
@@ -927,95 +1020,109 @@ void command()
 void process_pressed_key(void)
 {
     int key = read_key();
+    bool has_inserted_number = false;
 
-    if (isdigit(key)) {
-        if (editor.N == N_DEFAULT) {
-            if (key == '0') {
-                editor.N = N_DEFAULT;
-                return;
-            } else editor.N = key - '0';
-        } else {
-            editor.N *= 10;
-            editor.N += key - '0';
-        }
-        char bufN[64] = {0};
-        itoa(editor.N, bufN);
-        char msg[64];
-        sprintf(msg, "number: %s", bufN);
-        set_message(msg);
-    } else {
-        switch (key) {
-            case ALT_k: move_cursor_up();    break;
-            case ALT_j: move_cursor_down();  break;
-            case ALT_h: move_cursor_left();  break;
-            case ALT_l: move_cursor_right(); break;
+    switch (key)
+    {
+        case ALT_0:
+        case ALT_1:
+        case ALT_2:
+        case ALT_3:
+        case ALT_4:
+        case ALT_5:
+        case ALT_6:
+        case ALT_7:
+        case ALT_8:
+        case ALT_9: // TODO: function
+            int digit = key - 1000;
+            if (editor.N == N_DEFAULT) {
+                if (digit == 0) break;
+                else editor.N = digit;
+            } else {
+                editor.N *= 10;
+                editor.N += digit;
+            }
+            char bufN[64] = {0};
+            itoa(editor.N, bufN);
+            has_inserted_number = true;
+            break;
 
-            case ALT_K: move_cursor_begin_of_screen(); break;
-            case ALT_J: move_cursor_end_of_screen();   break;
-            case ALT_H: move_cursor_first_non_space(); break;
-            case ALT_L: move_cursor_last_non_space();  break;
+        case ALT_k: N_TIMES move_cursor_up();    break;
+        case ALT_j: N_TIMES move_cursor_down();  break;
+        case ALT_h: N_TIMES move_cursor_left();  break;
+        case ALT_l: N_TIMES move_cursor_right(); break;
 
-            //case CTRL_K: scroll_up();                          break;
-            //case CTRL_J: scroll_down();                        break;
-            //case CTRL_H: set_message("TODO: CTRL-H"); break;
-            //case CTRL_L: set_message("TODO: CTRL-L"); break;
+        case ALT_K: move_cursor_begin_of_screen(); break;
+        case ALT_J: move_cursor_end_of_screen();   break;
+        case ALT_H: move_cursor_first_non_space(); break;
+        case ALT_L: move_cursor_last_non_space();  break;
 
-            //case ALT_k: move_page_up();                      break; 
-            //case ALT_j: move_page_down();                    break;
-            //case ALT_h: set_message("TODO: ALT-h"); break;
-            //case ALT_l: set_message("TODO: ALT-l"); break;
-            //            
-            //case ALT_K: move_cursor_begin_of_file(); break;
-            //case ALT_J: move_cursor_end_of_file();   break;
-            //case ALT_H: move_cursor_begin_of_line(); break;
-            //case ALT_L: move_cursor_end_of_line();   break; 
+        //case CTRL_K: N_TIMES scroll_up();                          break;
+        //case CTRL_J: N_TIMES scroll_down();                        break;
+        //case CTRL_H: set_message("TODO: CTRL-H"); break;
+        //case CTRL_L: set_message("TODO: CTRL-L"); break;
 
-            case ALT_COLON: command(); break;
-            case ALT_BACKSPACE: delete_word(); break;
+        //case ALT_k: N_TIMES move_page_up();                      break; 
+        //case ALT_j: N_TIMES move_page_down();                    break;
+        //case ALT_h: set_message("TODO: ALT-h"); break;
+        //case ALT_l: set_message("TODO: ALT-l"); break;
+        //            
+        //case ALT_K: move_cursor_begin_of_file(); break;
+        //case ALT_J: move_cursor_end_of_file();   break;
+        //case ALT_H: move_cursor_begin_of_line(); break;
+        //case ALT_L: move_cursor_end_of_line();   break; 
 
-            case TAB:
-                if (editor.in_cmd) {
-                    // TODO: autocomplete command
-                } else {
-                    set_message("TODO: insert TAB");
-                    //insert_char('\t');
-                }
-                break;
-            case ENTER: // TODO: se si e' in_cmd si esegue execute_cmd (che fa anche il resto)
-                insert_char('\n');
-                break;
-            case CTRL_Q:
-                if (quit()) exit(0);
-                else return;
-            case CTRL_S:
-                save();
-                break;
-            case BACKSPACE:
-                delete_char();
-                break;
-                //case PAGE_UP:
-                //case PAGE_DOWN:
-                //    if (c == PAGE_UP && E.cy != 0)
-                //        E.cy = 0;
-                //    else if (c == PAGE_DOWN && E.cy != E.screenrows-1)
-                //        E.cy = E.screenrows-1;
-                //    {
-                //    int times = E.screenrows;
-                //    while(times--)
-                //        editorMoveCursor(c == PAGE_UP ? ARROW_UP:
-                //                                        ARROW_DOWN);
-                //    }
-                //    break;
+        case ALT_COLON: command(); break;
+        case ALT_BACKSPACE: N_TIMES delete_word(); break;
 
-            case ESC:
-                if (editor.in_cmd) editor.in_cmd = false;
-                break;
-            default:
-                if (isprint(key)) insert_char(key);
-                break;
-        }
-        editor.N = N_DEFAULT;
+        case TAB:
+            if (editor.in_cmd) {
+                // TODO: autocomplete command
+            } else {
+                set_message("TODO: insert TAB");
+                //insert_char('\t');
+            }
+            break;
+
+        case ENTER: // TODO: se si e' in_cmd si esegue execute_cmd (che fa anche il resto)
+            N_TIMES insert_char('\n');
+            break;
+
+        case CTRL_Q:
+            if (quit()) exit(0);
+            else return;
+
+        case CTRL_S:
+            save();
+            break;
+
+        case BACKSPACE:
+            N_TIMES { delete_char(); }
+            break;
+
+        //case PAGE_UP:
+        //case PAGE_DOWN:
+        //    if (c == PAGE_UP && E.cy != 0)
+        //        E.cy = 0;
+        //    else if (c == PAGE_DOWN && E.cy != E.screenrows-1)
+        //        E.cy = E.screenrows-1;
+        //    {
+        //    int times = E.screenrows;
+        //    while(times--)
+        //        editorMoveCursor(c == PAGE_UP ? ARROW_UP:
+        //                                        ARROW_DOWN);
+        //    }
+        //    break;
+
+        case ESC:
+            if (editor.in_cmd) editor.in_cmd = false;
+            break;
+
+        default:
+            if (isprint(key)) N_TIMES insert_char(key);
+            break;
     }
+    if (!has_inserted_number) editor.N = N_DEFAULT;
     editor.quit_times = QUIT_DEFAULT; /* Reset it to the original value. */
 }
 
@@ -1029,7 +1136,8 @@ int main(int argc, char **argv)
     char *filename = argc == 2 ? argv[1] : NULL;
 
     log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
-    init();
+    load_config();
+    initialize();
     open_file(filename);
     enable_raw_mode();
 
