@@ -491,6 +491,13 @@ void handle_sigwinch(int signo)
     refresh_screen();
 }
 
+typedef struct
+{
+    char *name;
+    char *type;
+} ConfigField;
+da_decl(ConfigField, ConfigFields);
+
 void print_config()
 {
     printf("Config {\n");
@@ -525,6 +532,17 @@ void load_config()
         rewind(config_file);
     }
 
+    ConfigFields remaining_fields = {0};
+    da_default(&remaining_fields);
+    da_push(&remaining_fields, ((ConfigField){.name="quit_times", .type="size_t"}));
+    da_push(&remaining_fields, ((ConfigField){.name="message_lifetime", .type="size_t"}));
+    for (size_t i = 0; i < remaining_fields.count; i++) {
+        printf("Field { name: `%s`, type: `%s` }\n", remaining_fields.items[i].name, remaining_fields.items[i].type);
+    }
+
+    ConfigFields inserted_fields = {0};
+    da_default(&inserted_fields);
+
     ssize_t res; 
     size_t len;
     char *full_line = NULL;
@@ -554,7 +572,38 @@ void load_config()
 
             // TODO: si puo' migliorare con un DA dei nomi dei campi da cui ogni volta si toglie quello gia' inserito
             // - si puo' anche inserire il tipo del campo cosi' da poter parametrizzare
-            // - usare due liste una dei campi rimanenti e una di quelli gia' fatti
+            // - usare due liste una dei campi rimanenti e una di quelli gia' fatti (perché se l'hai gia' fatto e lo incontri di nuovo significa che lo stai sovrascrivendo)
+            size_t i = 0;
+            bool found = false;
+            while (!found && i < remaining_fields.count) {
+                if (streq(field_name, remaining_fields.items[i].name)) {
+                    printf("Found %s\n", field_name);
+                    ConfigField removed_field;
+                    da_remove(&remaining_fields, (int)i, removed_field);
+                    da_push(&inserted_fields, removed_field);
+                    // TODO: now set config field
+                    found = true;
+                } else i++;
+            }
+
+            // TODO: now check in inserted_fields
+            if (!found) {
+                found = false;
+                i = 0;
+                while (!found && i < inserted_fields.count) {
+                    if (streq(field_name, inserted_fields.items[i].name)) {
+                        printf("Already inserted %s\n", field_name);
+                        // TODO: report error
+                        found = true;
+                    } else i++;
+                }
+            }
+
+            if (!found) { // TODO: report error unknown field
+
+            }
+            /// qui noi si sta lavorando
+            
             if (streq(field_name, "quit_times") && config.quit_times == 0) {
                 size_t value;
                 if ((value = atoi(field_value)) == 0) {
