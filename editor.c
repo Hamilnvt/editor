@@ -56,25 +56,31 @@ typedef struct
     size_t screenrows;
     size_t screencols;
     size_t page;
-    size_t quit_times;
 
-    //char message[256];
     String message;
     time_t message_time;
-    time_t message_max_time;
 
     String cmd;
     size_t cmd_pos;
     bool in_cmd;
 
+    size_t current_quit_times;
+
     int N; /* multiplicity for the command */
 } Editor;
+
+typedef struct
+{
+    size_t quit_times;
+    time_t message_lifetime;
+} Config;
+
+#define DEFAULT_QUIT_TIMES 3
+#define DEFAULT_MSG_LIFETIME 3
 
 #define N_DEFAULT -1 
 #define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
 #define N_TIMES for (size_t i = 0; i < N_OR_DEFAULT(1); i++)
-
-#define QUIT_DEFAULT 3
 
 #define CRNL "\r\n"
 #define CURRENT_Y_POS (editor.rowoff+editor.cy) 
@@ -120,7 +126,7 @@ typedef enum
     ALT_6,
     ALT_7,
     ALT_8,
-    ALT_9, // NOTE: ALT_digit sequences must be 1000+digit
+    ALT_9, // NOTE: ALT_digit sequences must be consecutive
 
     ALT_k,
     ALT_K,
@@ -137,8 +143,9 @@ typedef enum
 
 
 // Global variables ////////////////////////////// 
-int DISCARD_CHAR_RETURN;
+int DISCARD_CHAR_RETURN = 0;
 Editor editor = {0};
+Config config = {0};
 String screen_buf = {0};
 //////////////////////////////////////////////////
 
@@ -442,7 +449,7 @@ void refresh_screen(void)
         s_push_str(&screen_buf, editor.cmd.items, editor.cmd.count);
     } else {
         size_t msglen = editor.message.count;
-        if (msglen && time(NULL)-editor.message_time < 3) // TODO: make 3 a variable, max seconds to show the msg
+        if (msglen && time(NULL)-editor.message_time < config.message_lifetime)
             s_push_str(&screen_buf, editor.message.items, msglen);
     }
 
@@ -484,31 +491,109 @@ void handle_sigwinch(int signo)
     refresh_screen();
 }
 
-#define CONFIG_PATH "/home/mathieu/.config/editor/config"
+void print_config()
+{
+    printf("Config {\n");
+    printf("    quit_times: %zu\n", config.quit_times);
+    printf("    message_lifetime: %zu\n", config.message_lifetime);
+    printf("}\n");
+}
+
+#define CONFIG_PATH ".config/editor/config"
 void load_config()
 {
-    FILE *config_file = fopen(CONFIG_PATH, "r");
+    char *home = getenv("HOME");
+    if (home == NULL) {
+        fprintf(stderr, "Env variable HOME not set\n");
+        exit(1);
+    }
+    char full_config_path[256];
+    sprintf(full_config_path, "%s/%s", home, CONFIG_PATH);
+    FILE *config_file = fopen(full_config_path, "r");
     if (config_file == NULL) {
-        printf("Config file not found at " CONFIG_PATH "\n");
-        printf("Loading default config file.\n");
-        printf("\n-- Press any key to continue --\n");
-        getc(stdin);
-        // TODO: copy default_config file (provided in the repo) to CONFIG_PATH
-        return;
+        printf("Config file not found at %s\n", full_config_path);
+        config_file = fopen(full_config_path, "w+");
+        if (config_file == NULL) {
+            fprintf(stderr, "ERROR: Could not create config file\n");
+            exit(1);
+        }
+
+        fprintf(config_file, "quit_times: %u\n", DEFAULT_QUIT_TIMES);
+        fprintf(config_file, "message_lifetime: %u\n", DEFAULT_MSG_LIFETIME);
+
+        printf("Default config file has been created\n\n");
+        rewind(config_file);
     }
 
-    // TODO
     ssize_t res; 
     size_t len;
-    char *line = NULL;
-    int i = 0;
-    while ((res = getline(&line, &len, config_file)) != -1) {
-        i++;
-        printf("%d. `%s`", i, line);
+    char *full_line = NULL;
+    while ((res = getline(&full_line, &len, config_file)) != -1) {
+        res--;
+        if (res == 0) continue;
+        char *line = full_line;
+        line[res] = '\0';
+        while (isspace(*line)) {
+            line++;
+            res--;
+        }
+        if (res == 0) continue;
+        char *end = line+res-1;
+        while (isspace(*end)) {
+            end--;
+            res--;
+        }
+        *(end+1) = '\0';
+
+        char *colon = NULL;
+        if ((colon = strchr(line, ':')) != NULL) {
+            *colon = '\0';
+            char *field_name = line;
+            char *field_value = colon+1;
+            while(isspace(*field_value)) field_value++;
+
+            // TODO: si puo' migliorare con un DA dei nomi dei campi da cui ogni volta si toglie quello gia' inserito
+            // - si puo' anche inserire il tipo del campo cosi' da poter parametrizzare
+            // - usare due liste una dei campi rimanenti e una di quelli gia' fatti
+            if (streq(field_name, "quit_times") && config.quit_times == 0) {
+                size_t value;
+                if ((value = atoi(field_value)) == 0) {
+                    // TODO: report error
+                    config.quit_times = DEFAULT_QUIT_TIMES;
+                } else config.quit_times = value;
+                printf("CONFIG: %s = %zu\n", field_name, value);
+            } else if (streq(field_name, "message_lifetime") && config.message_lifetime == 0) {
+                size_t value;
+                if ((value = atoi(field_value)) == 0) {
+                    // TODO: report error
+                    config.message_lifetime = DEFAULT_MSG_LIFETIME;
+                } else config.message_lifetime = value;
+                printf("CONFIG: %s = %zu\n", field_name, value);
+            } else {
+                fprintf(stderr, "ERROR: unknown field `%s`\n", field_name);
+            }
+        } else if (*line == '#') {
+            printf("`%s`: command definition\n", line);
+        } else {
+            printf("CONFIG ERROR: syntax\n");
+            // TODO: track and report location
+        }
     }
-    free(line);
-    printf("\n-- Press any key to continue --\n");
-    getc(stdin);
+    free(full_line);
+
+    // TODO: now check if some fields are not set (con il DA e' molto piu' facile)
+    if (config.quit_times == 0) {
+        fprintf(stderr, "FIELD NOT SET: quit_times (default: %u)\n", DEFAULT_QUIT_TIMES);
+        config.quit_times = DEFAULT_QUIT_TIMES;
+    }
+    if (config.message_lifetime == 0) {
+        fprintf(stderr, "FIELD NOT SET: message_lifetime (default: %u)\n", DEFAULT_MSG_LIFETIME);
+        config.message_lifetime = DEFAULT_MSG_LIFETIME;
+    }
+
+    printf("\n-- Press ENTER to continue --\n");
+    while (getc(stdin) != '\n')
+        ;
 }
 
 void initialize()
@@ -529,7 +614,7 @@ void initialize()
     editor.rowoff = 0;
     editor.coloff = 0;
     editor.page = 0;
-    editor.quit_times = QUIT_DEFAULT;
+    editor.current_quit_times = config.quit_times;
 
     editor.cmd = (String){0};
     da_default(&editor.cmd);
@@ -538,7 +623,6 @@ void initialize()
 
     da_default(&editor.message);
     editor.message_time = (time_t)0;
-    editor.message_max_time = (time_t)3;
 
     editor.N = N_DEFAULT;
 
@@ -795,9 +879,9 @@ writeerr:
 
 bool quit(void)
 {
-    if (editor.dirty && editor.quit_times) {
-        set_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.quit_times, editor.quit_times == 1 ? "" : "s");
-        editor.quit_times--;
+    if (editor.dirty && editor.current_quit_times) {
+        set_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times, editor.current_quit_times == 1 ? "" : "s");
+        editor.current_quit_times--;
         return false;
     }
     return true;
@@ -1034,7 +1118,7 @@ void process_pressed_key(void)
         case ALT_7:
         case ALT_8:
         case ALT_9: // TODO: function
-            int digit = key - 1000;
+            int digit = key - ALT_0;
             if (editor.N == N_DEFAULT) {
                 if (digit == 0) break;
                 else editor.N = digit;
@@ -1123,7 +1207,7 @@ void process_pressed_key(void)
             break;
     }
     if (!has_inserted_number) editor.N = N_DEFAULT;
-    editor.quit_times = QUIT_DEFAULT; /* Reset it to the original value. */
+    editor.current_quit_times = config.quit_times;
 }
 
 int main(int argc, char **argv)
