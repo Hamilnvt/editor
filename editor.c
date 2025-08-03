@@ -75,8 +75,8 @@ typedef struct
     time_t message_lifetime;
 } Config;
 
-#define DEFAULT_QUIT_TIMES 3
-#define DEFAULT_MSG_LIFETIME 3
+const size_t DEFAULT_QUIT_TIMES = 3;
+const size_t DEFAULT_MSG_LIFETIME = 3;
 
 #define N_DEFAULT -1 
 #define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
@@ -491,12 +491,30 @@ void handle_sigwinch(int signo)
     refresh_screen();
 }
 
+typedef enum
+{
+    SIZE_T
+} FieldType;
+
 typedef struct
 {
-    char *name;
-    char *type;
+    const char *name;
+    FieldType type;
+    void *ptr;
+    const void *thefault;
 } ConfigField;
+
 da_decl(ConfigField, ConfigFields);
+
+ConfigField create_field(const char *name, FieldType type, void *ptr, const void *thefault)
+{
+    return (ConfigField){
+        .name=name,
+        .type=type,
+        .ptr=ptr,
+        .thefault=thefault
+    };
+}
 
 void print_config()
 {
@@ -525,8 +543,8 @@ void load_config()
             exit(1);
         }
 
-        fprintf(config_file, "quit_times: %u\n", DEFAULT_QUIT_TIMES);
-        fprintf(config_file, "message_lifetime: %u\n", DEFAULT_MSG_LIFETIME);
+        fprintf(config_file, "quit_times: %zu\n", DEFAULT_QUIT_TIMES);
+        fprintf(config_file, "message_lifetime: %zu\n", DEFAULT_MSG_LIFETIME);
 
         printf("Default config file has been created\n\n");
         rewind(config_file);
@@ -534,10 +552,16 @@ void load_config()
 
     ConfigFields remaining_fields = {0};
     da_default(&remaining_fields);
-    da_push(&remaining_fields, ((ConfigField){.name="quit_times", .type="size_t"}));
-    da_push(&remaining_fields, ((ConfigField){.name="message_lifetime", .type="size_t"}));
+    ConfigField field = {0};
+
+    field = create_field("quit_times", SIZE_T, (void *)&config.quit_times, (void *)&DEFAULT_QUIT_TIMES);
+    da_push(&remaining_fields, field);
+
+    field = create_field("message_lifetime", SIZE_T, &config.message_lifetime, &DEFAULT_MSG_LIFETIME);
+    da_push(&remaining_fields, field);
+
     for (size_t i = 0; i < remaining_fields.count; i++) {
-        printf("Field { name: `%s`, type: `%s` }\n", remaining_fields.items[i].name, remaining_fields.items[i].type);
+        printf("Field { name: `%s`, type: `%d` }\n", remaining_fields.items[i].name, remaining_fields.items[i].type);
     }
 
     ConfigFields inserted_fields = {0};
@@ -577,50 +601,43 @@ void load_config()
             bool found = false;
             while (!found && i < remaining_fields.count) {
                 if (streq(field_name, remaining_fields.items[i].name)) {
-                    printf("Found %s\n", field_name);
                     ConfigField removed_field;
                     da_remove(&remaining_fields, (int)i, removed_field);
                     da_push(&inserted_fields, removed_field);
-                    // TODO: now set config field
+                    switch (removed_field.type)
+                    {
+                        case SIZE_T:
+                            size_t value = atoi(field_value);
+                            if (value == 0) {
+                                fprintf(stderr, "ERROR: field `%s` expects a numeric value greater than 0, but got `%s`\n", field_name, field_value);
+                                fprintf(stderr, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
+                                *((size_t *)removed_field.ptr) = *((size_t *)removed_field.thefault);
+                            } else {
+                                *((size_t *)removed_field.ptr) = value;
+                                printf("CONFIG: field `%s` set to `%zu`\n", field_name, *((size_t *)removed_field.thefault));
+                            }
+                            break;
+                        default:
+                            fprintf(stderr, "Unreachable\n");
+                            abort();
+                    }
                     found = true;
                 } else i++;
             }
 
-            // TODO: now check in inserted_fields
             if (!found) {
                 found = false;
                 i = 0;
                 while (!found && i < inserted_fields.count) {
                     if (streq(field_name, inserted_fields.items[i].name)) {
-                        printf("Already inserted %s\n", field_name);
-                        // TODO: report error
+                        printf("ERROR: redeclaration of field `%s`\n", field_name);
                         found = true;
                     } else i++;
                 }
             }
 
-            if (!found) { // TODO: report error unknown field
+            if (!found) fprintf(stderr, "ERROR: unknown field `%s`\n", field_name);
 
-            }
-            /// qui noi si sta lavorando
-            
-            if (streq(field_name, "quit_times") && config.quit_times == 0) {
-                size_t value;
-                if ((value = atoi(field_value)) == 0) {
-                    // TODO: report error
-                    config.quit_times = DEFAULT_QUIT_TIMES;
-                } else config.quit_times = value;
-                printf("CONFIG: %s = %zu\n", field_name, value);
-            } else if (streq(field_name, "message_lifetime") && config.message_lifetime == 0) {
-                size_t value;
-                if ((value = atoi(field_value)) == 0) {
-                    // TODO: report error
-                    config.message_lifetime = DEFAULT_MSG_LIFETIME;
-                } else config.message_lifetime = value;
-                printf("CONFIG: %s = %zu\n", field_name, value);
-            } else {
-                fprintf(stderr, "ERROR: unknown field `%s`\n", field_name);
-            }
         } else if (*line == '#') {
             printf("`%s`: command definition\n", line);
         } else {
@@ -631,14 +648,15 @@ void load_config()
     free(full_line);
 
     // TODO: now check if some fields are not set (con il DA e' molto piu' facile)
-    if (config.quit_times == 0) {
-        fprintf(stderr, "FIELD NOT SET: quit_times (default: %u)\n", DEFAULT_QUIT_TIMES);
-        config.quit_times = DEFAULT_QUIT_TIMES;
-    }
-    if (config.message_lifetime == 0) {
-        fprintf(stderr, "FIELD NOT SET: message_lifetime (default: %u)\n", DEFAULT_MSG_LIFETIME);
-        config.message_lifetime = DEFAULT_MSG_LIFETIME;
-    }
+    printf("TODO: check if some fields are not set\n");
+    //if (config.quit_times == 0) {
+    //    fprintf(stderr, "FIELD NOT SET: quit_times (default: %zu)\n", DEFAULT_QUIT_TIMES);
+    //    config.quit_times = DEFAULT_QUIT_TIMES;
+    //}
+    //if (config.message_lifetime == 0) {
+    //    fprintf(stderr, "FIELD NOT SET: message_lifetime (default: %zu)\n", DEFAULT_MSG_LIFETIME);
+    //    config.message_lifetime = DEFAULT_MSG_LIFETIME;
+    //}
 
     printf("\n-- Press ENTER to continue --\n");
     while (getc(stdin) != '\n')
