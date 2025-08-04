@@ -1,7 +1,8 @@
 /* TODO:
     - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
-    - fare dei config che vengono caricati all'inizio (quit_times, message_max_time...)
+    - config:
+      > aggiungere una descrizione ai campi da mostrare in caso di errore/assenza del campo
       > possibilita' di definire nel config file nuovi comandi come composizioni di quelli builtin (4 lu ld significa 4 volte lu poi ld, o pensare ad un'altra sintassi)
       > possibilita' di assegnare comandi a combinazioni di tasti (questo sembra essere molto difficile, non ho idea di come si possa fare)
       > fare i comandi per le azioni base (salva, esci, spostati, ecc...)
@@ -58,7 +59,7 @@ typedef struct
     size_t page;
 
     String message;
-    time_t message_time;
+    time_t msg_time;
 
     String cmd;
     size_t cmd_pos;
@@ -72,11 +73,13 @@ typedef struct
 typedef struct
 {
     size_t quit_times;
-    time_t message_lifetime;
+    time_t msg_lifetime;
+    char *prova;
 } Config;
 
-const size_t DEFAULT_QUIT_TIMES = 3;
-const size_t DEFAULT_MSG_LIFETIME = 3;
+const size_t default_quit_times = 3;
+const size_t default_msg_lifetime = 3;
+const char * default_prova = "prova";
 
 #define N_DEFAULT -1 
 #define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
@@ -177,7 +180,7 @@ void set_message(const char *fmt, ...)
     vsnprintf(buf, editor.screencols, fmt, ap);
     s_clear(&editor.message);
     s_push_cstr(&editor.message, buf);
-    editor.message_time = time(NULL);
+    editor.msg_time = time(NULL);
     va_end(ap);
 }
 
@@ -449,7 +452,7 @@ void refresh_screen(void)
         s_push_str(&screen_buf, editor.cmd.items, editor.cmd.count);
     } else {
         size_t msglen = editor.message.count;
-        if (msglen && time(NULL)-editor.message_time < config.message_lifetime)
+        if (msglen && time(NULL)-editor.msg_time < config.msg_lifetime)
             s_push_str(&screen_buf, editor.message.items, msglen);
     }
 
@@ -493,8 +496,21 @@ void handle_sigwinch(int signo)
 
 typedef enum
 {
-    SIZE_T
+    UINT,
+    //STRING
 } FieldType;
+
+char *fieldtype_to_string(FieldType type)
+{
+    switch (type)
+    {
+        case UINT: return "uint";
+        //case STRING: return "string";
+        default:
+            fprintf(stderr, "Unreachable\n");
+            abort();
+    }
+}
 
 typedef struct
 {
@@ -516,11 +532,17 @@ ConfigField create_field(const char *name, FieldType type, void *ptr, const void
     };
 }
 
+#define ADD_CONFIG_FIELD(name, type)                                                            \
+    do {                                                                                        \
+        __field = create_field(#name, (type), (void *)&config.name, (void *)&default_ ## name); \
+        da_push(&remaining_fields, __field);                                                    \
+    } while (0);
+
 void print_config()
 {
     printf("Config {\n");
     printf("    quit_times: %zu\n", config.quit_times);
-    printf("    message_lifetime: %zu\n", config.message_lifetime);
+    printf("    msg_lifetime: %zu\n", config.msg_lifetime);
     printf("}\n");
 }
 
@@ -532,37 +554,39 @@ void load_config()
         fprintf(stderr, "Env variable HOME not set\n");
         exit(1);
     }
+    String config_log = s_new_empty();
     char full_config_path[256];
     sprintf(full_config_path, "%s/%s", home, CONFIG_PATH);
     FILE *config_file = fopen(full_config_path, "r");
     if (config_file == NULL) {
-        printf("Config file not found at %s\n", full_config_path);
+        s_push_fstr(&config_log, "WARNING: config file not found at %s\n", full_config_path);
         config_file = fopen(full_config_path, "w+");
         if (config_file == NULL) {
-            fprintf(stderr, "ERROR: Could not create config file\n");
+            s_push_fstr(&config_log, "ERROR: could not create config file\n");
+            s_print(config_log);
             exit(1);
         }
 
-        fprintf(config_file, "quit_times: %zu\n", DEFAULT_QUIT_TIMES);
-        fprintf(config_file, "message_lifetime: %zu\n", DEFAULT_MSG_LIFETIME);
+        fprintf(config_file, "quit_times: %zu\n", default_quit_times);
+        fprintf(config_file, "msg_lifetime: %zu\n", default_msg_lifetime);
 
-        printf("Default config file has been created\n\n");
+        s_push_fstr(&config_log, "NOTE: default config file has been created\n\n");
         rewind(config_file);
     }
 
     ConfigFields remaining_fields = {0};
     da_default(&remaining_fields);
-    ConfigField field = {0};
+    ConfigField __field;
 
-    field = create_field("quit_times", SIZE_T, (void *)&config.quit_times, (void *)&DEFAULT_QUIT_TIMES);
-    da_push(&remaining_fields, field);
+    ADD_CONFIG_FIELD(quit_times,   UINT);
+    ADD_CONFIG_FIELD(msg_lifetime, UINT);
 
-    field = create_field("message_lifetime", SIZE_T, &config.message_lifetime, &DEFAULT_MSG_LIFETIME);
-    da_push(&remaining_fields, field);
-
-    for (size_t i = 0; i < remaining_fields.count; i++) {
-        printf("Field { name: `%s`, type: `%d` }\n", remaining_fields.items[i].name, remaining_fields.items[i].type);
-    }
+    //if (DEBUG) {
+    //    for (size_t i = 0; i < remaining_fields.count; i++) {
+    //        const ConfigField *field = &remaining_fields.items[i];
+    //        printf("Field { name: `%s`, type: `%s` }\n", field->name, fieldtype_to_string(field->type));
+    //    }
+    //}
 
     ConfigFields inserted_fields = {0};
     da_default(&inserted_fields);
@@ -594,9 +618,6 @@ void load_config()
             char *field_value = colon+1;
             while(isspace(*field_value)) field_value++;
 
-            // TODO: si puo' migliorare con un DA dei nomi dei campi da cui ogni volta si toglie quello gia' inserito
-            // - si puo' anche inserire il tipo del campo cosi' da poter parametrizzare
-            // - usare due liste una dei campi rimanenti e una di quelli gia' fatti (perché se l'hai gia' fatto e lo incontri di nuovo significa che lo stai sovrascrivendo)
             size_t i = 0;
             bool found = false;
             while (!found && i < remaining_fields.count) {
@@ -606,19 +627,30 @@ void load_config()
                     da_push(&inserted_fields, removed_field);
                     switch (removed_field.type)
                     {
-                        case SIZE_T:
+                        case UINT: {
                             size_t value = atoi(field_value);
                             if (value == 0) {
-                                fprintf(stderr, "ERROR: field `%s` expects a numeric value greater than 0, but got `%s`\n", field_name, field_value);
-                                fprintf(stderr, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
+                                s_push_fstr(&config_log, "ERROR: field `%s` expects an integer greater than 0, but got `%s`\n", field_name, field_value);
+                                s_push_fstr(&config_log, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
                                 *((size_t *)removed_field.ptr) = *((size_t *)removed_field.thefault);
                             } else {
                                 *((size_t *)removed_field.ptr) = value;
-                                printf("CONFIG: field `%s` set to `%zu`\n", field_name, *((size_t *)removed_field.thefault));
+                                //printf("CONFIG: field `%s` set to `%zu`\n", field_name, value);
                             }
-                            break;
+                        } break;
+                        //case STRING: {
+                        //    char *value = field_value;
+                        //    if (strlen(value) == 0) {
+                        //        fprintf(stderr, "ERROR: field `%s` expects a non empty string value\n", field_name);
+                        //        fprintf(stderr, "NOTE: defaulted to `%s`\n", *((char **)removed_field.thefault));
+                        //        *((char **)removed_field.ptr) = strdup(*((char **)removed_field.thefault));
+                        //    } else {
+                        //        *((char **)removed_field.ptr) = strdup(value);
+                        //        //printf("CONFIG: field `%s` set to `%s`\n", field_name, value);
+                        //    }
+                        //} break;
                         default:
-                            fprintf(stderr, "Unreachable\n");
+                            fprintf(stderr, "Unreachable field type in load_config\n");
                             abort();
                     }
                     found = true;
@@ -630,37 +662,55 @@ void load_config()
                 i = 0;
                 while (!found && i < inserted_fields.count) {
                     if (streq(field_name, inserted_fields.items[i].name)) {
-                        printf("ERROR: redeclaration of field `%s`\n", field_name);
+                        s_push_fstr(&config_log, "ERROR: redeclaration of field `%s`\n", field_name);
                         found = true;
                     } else i++;
                 }
             }
 
-            if (!found) fprintf(stderr, "ERROR: unknown field `%s`\n", field_name);
+            if (!found) s_push_fstr(&config_log, "ERROR: unknown field `%s`\n", field_name);
 
         } else if (*line == '#') {
-            printf("`%s`: command definition\n", line);
+            line++;
+            s_push_fstr(&config_log, "TOOD: define command `%s`\n", line);
         } else {
-            printf("CONFIG ERROR: syntax\n");
+            s_push_fstr(&config_log, "ERROR: I don't know what to do with `%s`\n", line);
             // TODO: track and report location
         }
     }
     free(full_line);
 
-    // TODO: now check if some fields are not set (con il DA e' molto piu' facile)
-    printf("TODO: check if some fields are not set\n");
-    //if (config.quit_times == 0) {
-    //    fprintf(stderr, "FIELD NOT SET: quit_times (default: %zu)\n", DEFAULT_QUIT_TIMES);
-    //    config.quit_times = DEFAULT_QUIT_TIMES;
-    //}
-    //if (config.message_lifetime == 0) {
-    //    fprintf(stderr, "FIELD NOT SET: message_lifetime (default: %zu)\n", DEFAULT_MSG_LIFETIME);
-    //    config.message_lifetime = DEFAULT_MSG_LIFETIME;
-    //}
+    if (remaining_fields.count > 0) {
+        s_push_cstr(&config_log, "\nWARNING: the following fields have not been set:\n");
+        for (size_t i = 0; i < remaining_fields.count; i++) {
+            const ConfigField *field = &remaining_fields.items[i];
+            s_push_fstr(&config_log, " -> %s (type: %s, default: ", field->name, fieldtype_to_string(field->type));
+            switch (field->type)
+            {
+                case UINT:
+                    s_push_fstr(&config_log, "`%zu`)\n", *(size_t *)field->thefault);
+                    *((size_t *)field->ptr) = *((size_t *)field->thefault);
+                    break;
+                //case STRING:
+                //    fprintf(stderr, "`%s`)\n", *(char **)field->thefault);
+                //    *((char **)field->ptr) = strdup(*((char **)field->thefault));
+                //    break;
+                default:
+                    fprintf(stderr, "Unreachable field type in load_config\n");
+                    abort();
+            }
+        }
+    }
 
-    printf("\n-- Press ENTER to continue --\n");
-    while (getc(stdin) != '\n')
-        ;
+    if (!s_is_empty(config_log)) {
+        s_push_null(&config_log);
+        s_print(config_log);
+        printf("\n-- Press ENTER to continue --\n");
+        printf(ANSI_HIDE_CURSOR"\n");
+        while (getc(stdin) != '\n')
+            ;
+        printf(ANSI_SHOW_CURSOR"\n");
+    }
 }
 
 void initialize()
@@ -689,7 +739,7 @@ void initialize()
     editor.in_cmd = false;
 
     da_default(&editor.message);
-    editor.message_time = (time_t)0;
+    editor.msg_time = (time_t)0;
 
     editor.N = N_DEFAULT;
 
@@ -973,19 +1023,27 @@ void insert_char_at(Row *row, size_t at, int c)
 
 typedef enum
 {
-    UNKNOWN,
+    MOVE_CURSOR_UP,
+    MOVE_CURSOR_DOWN,
+    MOVE_CURSOR_LEFT,
+    MOVE_CURSOR_RIGHT,
     MOVE_LINE_UP,
     MOVE_LINE_DOWN,
+    UNKNOWN,
     CMDS_COUNT
 } Command;
 
 Command parse_cmd()
 {
     char *cmd = editor.cmd.items;
-    static_assert(CMDS_COUNT == 3, "Parse all commands in parse_cmd");
-    if      (streq(cmd, "lu")) return MOVE_LINE_UP;
-    else if (streq(cmd, "ld")) return MOVE_LINE_DOWN;
-    else                       return UNKNOWN;
+    static_assert(CMDS_COUNT == 7, "Parse all commands in parse_cmd");
+    if      (streq(cmd, "u"))   return MOVE_CURSOR_UP;
+    else if (streq(cmd, "d"))   return MOVE_CURSOR_DOWN;
+    else if (streq(cmd, "l"))   return MOVE_CURSOR_LEFT;
+    else if (streq(cmd, "r"))   return MOVE_CURSOR_RIGHT;
+    else if (streq(cmd, "lnu")) return MOVE_LINE_UP;
+    else if (streq(cmd, "lnd")) return MOVE_LINE_DOWN;
+    else                        return UNKNOWN;
 }
 
 void move_line_up()
@@ -1008,14 +1066,22 @@ void move_line_down()
     editor.cy++;
 }
 
-void execute_cmd()
+void execute_cmd() // TODO: al posto di N_TIMES parsare i primi caratteri e se sono un numero usare quel numero come moltiplicità, cosi' si puo' scrivere 3lnd e spostera' la riga giu' di 3
+                   // - lasciare anche il cursore dov'era nell'editor invece di spostarlo solamente nella command line
+                   // - argomenti dei comandi, ad esempio `i=ciao` inserisce "ciao" (cmd=arg1,arg2), vanno parsati e quindi Command sara' una struttura piu' complessa con un da di stringhe
+                   // - se separati da uno spazio sono due comandi concatenati
+                   // - storia dei comandi usati, si scorre con ALT_k e ALT_j
 {
-    static_assert(CMDS_COUNT == 3, "Implement all commands in execute_cmd");
+    static_assert(CMDS_COUNT == 7, "Implement all commands in execute_cmd");
     Command cmd = parse_cmd();
     switch (cmd)
     {
-        case MOVE_LINE_UP  : N_TIMES move_line_up();   break;
-        case MOVE_LINE_DOWN: N_TIMES move_line_down(); break;
+        case MOVE_CURSOR_UP   : N_TIMES move_cursor_up();    break;
+        case MOVE_CURSOR_DOWN : N_TIMES move_cursor_down();  break; 
+        case MOVE_CURSOR_LEFT : N_TIMES move_cursor_left();  break;
+        case MOVE_CURSOR_RIGHT: N_TIMES move_cursor_right(); break;
+        case MOVE_LINE_UP     : N_TIMES move_line_up();      break;
+        case MOVE_LINE_DOWN   : N_TIMES move_line_down();    break;
 
         case UNKNOWN:
         default:
