@@ -7,9 +7,11 @@
       > possibilita' di assegnare comandi a combinazioni di tasti (questo sembra essere molto difficile, non ho idea di come si possa fare)
       > fare i comandi per le azioni base (salva, esci, spostati, ecc...)
     - sistema di registrazione macro (a cui magari si puo' dare un nome e le si esegue come comandi o con shortcut)
-    - funzioni separate per quando si scrive il comando (altrimenti non si capisce niente)
+    - funzioni separate per la modifica della command line (altrimenti non si capisce niente)
       > cambiare anche process_pressed_key in modo da prendere solo gli input che valgono anche per il comando (altrimenti dovrei controllare in ogni funzione se si e' in_cmd e poi fare return
     - gestire con max_int o come si chiama il limite di editor.N
+    - undo
+      > undo dei comandi
 
     - ref: https://viewsourcecode.org/snaptoken/kilo/index.html
 */
@@ -37,7 +39,6 @@ bool strneq(const char *s1, const char *s2, size_t n) { return strncmp(s1, s2, n
 
 typedef struct
 {
-    size_t i;
     String content;
 } Row;
 
@@ -47,7 +48,7 @@ typedef struct
 {
     char *filename;
     Rows rows;
-    int dirty; // TODO: quando si esegue un'azione che modifica lo editor si fa una copia (o comunque si copia parte dello editor) che si inserisce in una struttura dati che permette di ciclare sulle varie 'versioni' dello editor. dirty tiene conto di quale editor si sta guardando e quante modifiche sono state fatte
+    int dirty; // TODO: quando si esegue un'azione che modifica lo editor si fa una copia (o comunque si copia parte dell'editor) che si inserisce in una struttura dati che permette di ciclare sulle varie 'versioni' dell'editor. dirty tiene conto di quale editor si sta guardando e quante modifiche sono state fatte
     bool rawmode;
 
     size_t cx;
@@ -384,30 +385,64 @@ void refresh_screen(void)
     s_push_cstr(&screen_buf, ANSI_GO_HOME_CURSOR);
 
     Row *row;
-    size_t filerow;
-    for (filerow = editor.rowoff; filerow < editor.rowoff+editor.screenrows; filerow++) {
-        if (filerow >= editor.rows.count) { // TODO: poi lo voglio togliere, ora lo uso per debuggare
-            s_push_cstr(&screen_buf,"~" ANSI_ERASE_LINE_FROM_CURSOR CRNL);
+    for (size_t y = editor.rowoff; y < editor.rowoff+editor.screenrows; y++) {
+        // TODO: si puo' fattorizzare la funzione che aggiunge gli spazi per keep_cursor
+        bool is_current_line = y == editor.cy-editor.rowoff;
+
+        if (y >= editor.rows.count) {
+            if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push(&screen_buf, '~'); // TODO: poi lo voglio togliere, forse, ma ora lo uso per debuggare
+            if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_RESET);
+            if (is_current_line && editor.in_cmd && editor.cx > 0) {
+                for (size_t x = 1; x < editor.cx; x++) {
+                    s_push(&screen_buf, ' ');
+                }
+                s_push_cstr(&screen_buf, ANSI_INVERSE);
+                s_push(&screen_buf, ' ');
+                s_push_cstr(&screen_buf, ANSI_RESET);
+            }
+            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
             continue;
         }
 
-        row = ROW(filerow);
+        row = ROW(y);
 
         size_t len = row->content.count - editor.coloff;
-        if (len > 0) {
-            if (len > editor.screencols) len = editor.screencols; // TODO: viene troncata la riga
-            int c;
-            for (size_t j = 0; j < len; j++) {
-                c = row->content.items[j];
-                if (!isprint(c)) {
-                    s_push_cstr(&screen_buf, ANSI_INVERSE);
-                    if (c <= 26) {
-                        s_push(&screen_buf, '^');
-                        s_push(&screen_buf, '@'+c);
-                    } else s_push(&screen_buf, '?');
-                    s_push_cstr(&screen_buf, ANSI_RESET);
-                } else s_push(&screen_buf, c);
+        if (len <= 0) {
+            if (is_current_line && editor.in_cmd) {
+                for (size_t x = 0; x < editor.cx; x++) {
+                    s_push(&screen_buf, ' ');
+                }
+                s_push_cstr(&screen_buf, ANSI_INVERSE);
+                s_push(&screen_buf, ' ');
+                s_push_cstr(&screen_buf, ANSI_RESET);
             }
+            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
+            continue; 
+        }
+        if (len > editor.screencols) len = editor.screencols; // TODO: viene troncata la riga
+        int c;
+        for (size_t x = 0; x < len; x++) {
+            c = row->content.items[x];
+            bool keep_cursor = is_current_line && editor.in_cmd && x == editor.cx-editor.coloff;
+            if (keep_cursor) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            if (!isprint(c)) {
+                s_push_cstr(&screen_buf, ANSI_INVERSE);
+                if (c <= 26) {
+                    s_push(&screen_buf, '^');
+                    s_push(&screen_buf, '@'+c);
+                } else s_push(&screen_buf, '?');
+                s_push_cstr(&screen_buf, ANSI_RESET);
+            } else s_push(&screen_buf, c);
+            if (keep_cursor) s_push_cstr(&screen_buf, ANSI_RESET);
+        }
+        if (is_current_line && editor.in_cmd && len <= editor.cx) {
+            for (size_t x = len; x < editor.cx; x++) {
+                s_push(&screen_buf, ' ');
+            }
+            s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push(&screen_buf, ' ');
+            s_push_cstr(&screen_buf, ANSI_RESET);
         }
         s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
     }
@@ -465,9 +500,9 @@ void refresh_screen(void)
         cx = strlen("Command: ")+editor.cmd_pos+1;
         cy = editor.screencols-1;
     } else {
-        filerow = CURRENT_Y_POS;
-        if (filerow < editor.rows.count) {
-            Row *row = ROW(filerow);
+        size_t y = CURRENT_Y_POS;
+        if (y < editor.rows.count) {
+            Row *row = ROW(y);
             size_t rowlen = strlen(row->content.items);
             for (size_t j = editor.coloff; j < (CURRENT_X_POS); j++) {
                 if (j < rowlen && row->content.items[j] == TAB) cx += 4;
@@ -764,7 +799,7 @@ void open_file(char *filename)
         while (*tmp != '/') tmp--;
         filename = tmp+1;
     }
-    editor.filename = strdup(filename); // TODO: rember to free (and check at the beginning of this function)
+    editor.filename = strdup(filename);
 
     if (file == NULL) return;
 
@@ -779,48 +814,6 @@ void open_file(char *filename)
     }
     free(line);
 }
-
-//void draw_rows()
-//{
-//    for (size_t i = 0; i < editor.screenrows; i++) {
-//        if (i < editor.rows.count) {
-//            Row *row = ROW(editor.page*editor.screenrows+editor.rowoff+i);
-//            s_push_str(&screen_buf, row->content.items, strlen(row->content.items));    
-//        }
-//        s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
-//    }
-//}
-
-//int curr_row_percentile() { return (int)(((float)editor.rowoff/(editor.rows.count))*100); }
-
-// TODO: la status bar viene ridisegnata quando needs_redraw e' true, forse devo distinguere diverse variabili (quindi inserire status_bar_needs_redraw)
-//void draw_status_bar()
-//{
-//    s_push_cstr(&screen_buf, "\x1b[7m");
-//
-//    char perc_buf[32] = {0};
-//    if (editor.rowoff == 0) sprintf(perc_buf, "%s", "Top");
-//    else if (editor.rowoff == editor.rows.count-1) sprintf(perc_buf, "%s", "Bot");
-//    else sprintf(perc_buf, "%d%%", curr_row_percentile());
-//
-//    char status[128] = {0};
-//    size_t len = snprintf(status, sizeof(status), " %s - (%zu, %zu) - %zu lines (%s) - [page %zu/%zu]", 
-//            editor.filename == NULL ? "unnamed" : editor.filename, 
-//            editor.cx+1, 
-//            editor.rowoff+1, 
-//            editor.rows.count, 
-//            perc_buf,
-//            editor.page+1, 
-//            editor.pages
-//    ); // TODO: percentuale
-//    if (len > editor.screencols) len = editor.screencols;
-//    s_push_str(&screen_buf, status, len);
-//    while (len < editor.screencols) {
-//        s_push_cstr(&screen_buf, " ");
-//        len++;
-//    }
-//    s_push_cstr(&screen_buf, "\x1b[m");
-//}
 
 // TODO: now it's trivial
 void move_cursor_up() 
@@ -963,7 +956,6 @@ bool save(void)
 {
     String save_buf = {0};
     da_default(&save_buf);
-    // TODO: build save_buf from editor.rows
     Row *row;
     for (size_t i = 0; i < editor.rows.count; i++) {
         row = ROW(i);
@@ -972,6 +964,7 @@ bool save(void)
     }
 
     // TODO: make the user decide, in the status line, the name of the file if not set
+    // - probabilmente devo fare un sistema che permetta di cambiare l'inizio della command line (ora e' sempre Command:) e poi fare cose diverse una volta che si e' premuto ENTER
     int fd = open(editor.filename, O_RDWR|O_CREAT, 0644);
     if (fd == -1) goto writeerr;
 
@@ -1013,37 +1006,7 @@ void insert_char_at(Row *row, size_t at, int c)
         da_push(&row->content, c);
     } else {
         da_insert(&row->content, c, (int)at);
-        //if (row->content.count == 0) { // TODO: qui si puo' fare solo insert?
-        //    da_push(&row->content, c);
-        //} else {
-        //    da_insert(&row->content, c, (int)at);
-        //}
     }
-}
-
-typedef enum
-{
-    MOVE_CURSOR_UP,
-    MOVE_CURSOR_DOWN,
-    MOVE_CURSOR_LEFT,
-    MOVE_CURSOR_RIGHT,
-    MOVE_LINE_UP,
-    MOVE_LINE_DOWN,
-    UNKNOWN,
-    CMDS_COUNT
-} Command;
-
-Command parse_cmd()
-{
-    char *cmd = editor.cmd.items;
-    static_assert(CMDS_COUNT == 7, "Parse all commands in parse_cmd");
-    if      (streq(cmd, "u"))   return MOVE_CURSOR_UP;
-    else if (streq(cmd, "d"))   return MOVE_CURSOR_DOWN;
-    else if (streq(cmd, "l"))   return MOVE_CURSOR_LEFT;
-    else if (streq(cmd, "r"))   return MOVE_CURSOR_RIGHT;
-    else if (streq(cmd, "lnu")) return MOVE_LINE_UP;
-    else if (streq(cmd, "lnd")) return MOVE_LINE_DOWN;
-    else                        return UNKNOWN;
 }
 
 void move_line_up()
@@ -1066,27 +1029,108 @@ void move_line_down()
     editor.cy++;
 }
 
+typedef enum
+{
+    MOVE_CURSOR_UP,
+    MOVE_CURSOR_DOWN,
+    MOVE_CURSOR_LEFT,
+    MOVE_CURSOR_RIGHT,
+    MOVE_LINE_UP,
+    MOVE_LINE_DOWN,
+    UNKNOWN,
+    CMDS_COUNT
+} CommandType;
+
+da_decl(char *, Strings);
+
+typedef struct
+{
+    CommandType type;
+    Strings args;
+} Command;
+
+da_decl(Command, Commands);
+
+CommandType parse_cmdtype(char *type)
+{
+    static_assert(CMDS_COUNT == 7, "Parse all commands in parse_cmd");
+    if      (streq(type, "u"))   return MOVE_CURSOR_UP;
+    else if (streq(type, "d"))   return MOVE_CURSOR_DOWN;
+    else if (streq(type, "l"))   return MOVE_CURSOR_LEFT;
+    else if (streq(type, "r"))   return MOVE_CURSOR_RIGHT;
+    else if (streq(type, "lnu")) return MOVE_LINE_UP;
+    else if (streq(type, "lnd")) return MOVE_LINE_DOWN;
+    else                         return UNKNOWN;
+}
+
+// TODO: parse concatenated commands + arguments
+Commands parse_cmds()
+{
+    char *cmds_str = editor.cmd.items;
+    Commands cmds = {0};
+    da_init(&cmds, 2, DA_DEFAULT_FAC);
+
+    log_this("cmds string: `%s`", cmds_str);
+
+    char *saveptr_cmds;
+    char *cmd_str = strtok_r(cmds_str, " \t", &saveptr_cmds);
+    while (cmd_str != NULL) {
+        log_this("- `%s`", cmd_str);
+
+        Command cmd = {0};
+        da_init(&cmd.args, 2, DA_DEFAULT_FAC);
+        char *args = strchr(cmd_str, '.');
+        if (args != NULL) {
+            *args = '\0';
+            args++;
+            if (!strchr(args, ',')) {
+                // TODO
+                log_this("Un solo argomento: %s", args);
+            } else {
+                // TODO
+                log_this("Piu' argomenti");
+                char *saveptr_args;
+                char *arg = strtok_r(args, ",", &saveptr_args);
+                while (arg != NULL) {
+                    log_this("-> arg: `%s`", arg);
+                    arg = strtok_r(NULL, ",", &saveptr_args);
+                }
+            }
+        }
+        cmd.type = parse_cmdtype(cmd_str);
+        log_this("-> type: %d", cmd.type);
+
+        da_push(&cmds, cmd);
+
+        cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
+    }
+
+    return cmds;
+}
+
 void execute_cmd() // TODO: al posto di N_TIMES parsare i primi caratteri e se sono un numero usare quel numero come moltiplicità, cosi' si puo' scrivere 3lnd e spostera' la riga giu' di 3
-                   // - lasciare anche il cursore dov'era nell'editor invece di spostarlo solamente nella command line
-                   // - argomenti dei comandi, ad esempio `i=ciao` inserisce "ciao" (cmd=arg1,arg2), vanno parsati e quindi Command sara' una struttura piu' complessa con un da di stringhe
+                   // - argomenti dei comandi, ad esempio `i.ciao` inserisce "ciao" (cmd.arg1,arg2), vanno parsati e quindi Command sara' una struttura piu' complessa con un da di stringhe
                    // - se separati da uno spazio sono due comandi concatenati
                    // - storia dei comandi usati, si scorre con ALT_k e ALT_j
 {
     static_assert(CMDS_COUNT == 7, "Implement all commands in execute_cmd");
-    Command cmd = parse_cmd();
-    switch (cmd)
-    {
-        case MOVE_CURSOR_UP   : N_TIMES move_cursor_up();    break;
-        case MOVE_CURSOR_DOWN : N_TIMES move_cursor_down();  break; 
-        case MOVE_CURSOR_LEFT : N_TIMES move_cursor_left();  break;
-        case MOVE_CURSOR_RIGHT: N_TIMES move_cursor_right(); break;
-        case MOVE_LINE_UP     : N_TIMES move_line_up();      break;
-        case MOVE_LINE_DOWN   : N_TIMES move_line_down();    break;
+    Commands cmds = parse_cmds();
+    // TODO
+    //for (size_t i = 0; i < cmds.count; i++) {
+    //    const Command *cmd = &cmds.items[i];
+    //    switch (cmd->type)
+    //    {
+    //        case MOVE_CURSOR_UP   : N_TIMES move_cursor_up();    break;
+    //        case MOVE_CURSOR_DOWN : N_TIMES move_cursor_down();  break; 
+    //        case MOVE_CURSOR_LEFT : N_TIMES move_cursor_left();  break;
+    //        case MOVE_CURSOR_RIGHT: N_TIMES move_cursor_right(); break;
+    //        case MOVE_LINE_UP     : N_TIMES move_line_up();      break;
+    //        case MOVE_LINE_DOWN   : N_TIMES move_line_down();    break;
 
-        case UNKNOWN:
-        default:
-            set_message("Unknown command `%s`", editor.cmd.items); 
-    }
+    //        case UNKNOWN:
+    //        default: set_message("Unknown command `%s`", editor.cmd.items); 
+    //    }
+    //}
 }
 
 void insert_char(char c)
