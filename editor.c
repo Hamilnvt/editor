@@ -1,6 +1,7 @@
 /* TODO:
     - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
+    - coda dei messaggi da mostrare
     - config:
       > aggiungere una descrizione ai campi da mostrare in caso di errore/assenza del campo
       > possibilita' di definire nel config file nuovi comandi come composizioni di quelli builtin (4 lu ld significa 4 volte lu poi ld, o pensare ad un'altra sintassi)
@@ -1051,6 +1052,32 @@ typedef struct
 
 da_decl(Command, Commands);
 
+void free_commands(Commands *cmds)
+{
+    for (size_t i = 0; i < cmds->count; i++) {
+        Command *cmd = &cmds->items[i];
+        for (size_t j = 0; j < cmd->args.count; j++) {
+            free(cmd->args.items[j]);
+        }
+        if (cmd->args.count > 0) da_free(&cmd->args);
+    }
+    da_free(cmds);
+}
+
+void print_commands(const Commands *cmds)
+{
+    log_this("Commands:");
+    for (size_t i = 0; i < cmds->count; i++) {
+        const Command *cmd = &cmds->items[i];
+        log_this("%d. %d", i, cmd->type);
+        if (cmd->args.count > 0) log_this("args:");
+        for (size_t j = 0; j < cmd->args.count; j++) {
+            char *arg = cmd->args.items[j];
+            log_this(" - %d. %s", j, arg);
+        }
+    }
+}
+
 CommandType parse_cmdtype(char *type)
 {
     static_assert(CMDS_COUNT == 7, "Parse all commands in parse_cmd");
@@ -1063,20 +1090,15 @@ CommandType parse_cmdtype(char *type)
     else                         return UNKNOWN;
 }
 
-// TODO: parse concatenated commands + arguments
 Commands parse_cmds()
 {
     char *cmds_str = editor.cmd.items;
     Commands cmds = {0};
     da_init(&cmds, 2, DA_DEFAULT_FAC);
 
-    log_this("cmds string: `%s`", cmds_str);
-
     char *saveptr_cmds;
     char *cmd_str = strtok_r(cmds_str, " \t", &saveptr_cmds);
     while (cmd_str != NULL) {
-        log_this("- `%s`", cmd_str);
-
         Command cmd = {0};
         da_init(&cmd.args, 2, DA_DEFAULT_FAC);
         char *args = strchr(cmd_str, '.');
@@ -1084,53 +1106,44 @@ Commands parse_cmds()
             *args = '\0';
             args++;
             if (!strchr(args, ',')) {
-                // TODO
-                log_this("Un solo argomento: %s", args);
+                da_push(&cmd.args, strdup(args)); // TODO: free at the end
             } else {
-                // TODO
-                log_this("Piu' argomenti");
                 char *saveptr_args;
                 char *arg = strtok_r(args, ",", &saveptr_args);
                 while (arg != NULL) {
-                    log_this("-> arg: `%s`", arg);
+                    da_push(&cmd.args, strdup(arg)); // TODO: free at the end
                     arg = strtok_r(NULL, ",", &saveptr_args);
                 }
             }
         }
         cmd.type = parse_cmdtype(cmd_str);
-        log_this("-> type: %d", cmd.type);
-
         da_push(&cmds, cmd);
-
         cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
     }
-
     return cmds;
 }
 
 void execute_cmd() // TODO: al posto di N_TIMES parsare i primi caratteri e se sono un numero usare quel numero come moltiplicità, cosi' si puo' scrivere 3lnd e spostera' la riga giu' di 3
-                   // - argomenti dei comandi, ad esempio `i.ciao` inserisce "ciao" (cmd.arg1,arg2), vanno parsati e quindi Command sara' una struttura piu' complessa con un da di stringhe
-                   // - se separati da uno spazio sono due comandi concatenati
                    // - storia dei comandi usati, si scorre con ALT_k e ALT_j
 {
     static_assert(CMDS_COUNT == 7, "Implement all commands in execute_cmd");
     Commands cmds = parse_cmds();
-    // TODO
-    //for (size_t i = 0; i < cmds.count; i++) {
-    //    const Command *cmd = &cmds.items[i];
-    //    switch (cmd->type)
-    //    {
-    //        case MOVE_CURSOR_UP   : N_TIMES move_cursor_up();    break;
-    //        case MOVE_CURSOR_DOWN : N_TIMES move_cursor_down();  break; 
-    //        case MOVE_CURSOR_LEFT : N_TIMES move_cursor_left();  break;
-    //        case MOVE_CURSOR_RIGHT: N_TIMES move_cursor_right(); break;
-    //        case MOVE_LINE_UP     : N_TIMES move_line_up();      break;
-    //        case MOVE_LINE_DOWN   : N_TIMES move_line_down();    break;
+    for (size_t i = 0; i < cmds.count; i++) {
+        const Command *cmd = &cmds.items[i];
+        switch (cmd->type)
+        {
+            case MOVE_CURSOR_UP   : N_TIMES move_cursor_up();    break;
+            case MOVE_CURSOR_DOWN : N_TIMES move_cursor_down();  break; 
+            case MOVE_CURSOR_LEFT : N_TIMES move_cursor_left();  break;
+            case MOVE_CURSOR_RIGHT: N_TIMES move_cursor_right(); break;
+            case MOVE_LINE_UP     : N_TIMES move_line_up();      break;
+            case MOVE_LINE_DOWN   : N_TIMES move_line_down();    break;
 
-    //        case UNKNOWN:
-    //        default: set_message("Unknown command `%s`", editor.cmd.items); 
-    //    }
-    //}
+            case UNKNOWN:
+            default: set_message("Unknown command `%s`", editor.cmd.items); 
+        }
+    }
+    free_commands(&cmds);
 }
 
 void insert_char(char c)
