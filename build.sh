@@ -2,4 +2,4 @@
 
 clear
 
-cc -o editor editor.c -Wall -Wextra -O2
+gcc -o editor editor.c -Wall -Wextra -O2 -Wswitch-enum -Werror
