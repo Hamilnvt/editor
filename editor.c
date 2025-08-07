@@ -10,7 +10,7 @@
         - si genera nel config file di default e poi si mostra lo stesso errore, quindi deve stare da qualche parte
       > possibilita' di definire nel config file nuovi comandi come composizioni di quelli builtin (4 lu ld significa 4 volte lu poi ld, o pensare ad un'altra sintassi)
         - serve un terminatore del comando? (ad esempio ';')
-        - gestione degli argomenti dei comandi definiti dall'utente, magari $1...
+        - gestione degli argomenti dei comandi definiti dall'utente, magari $0 oppure {0}
             > esempio 1. #cmd: ciao sono {} il {} => `cmd.tanica,tastiere`
             > esempio 2. #cmd: daje.{0} => `cmd.roma`
             > esempio 3. #cmd: ciao.{nome} come stai => `cmd.mario` oppure `cmd.nome=mario`
@@ -161,8 +161,6 @@ int DISCARD_CHAR_RETURN = 0;
 Editor editor = {0};
 Config config = {0};
 String screen_buf = {0};
-Strings builtin_cmds_names = {0};
-Strings user_cmds_names = {0};
 //////////////////////////////////////////////////
 
 const char *logpath = "./log.txt";
@@ -614,61 +612,38 @@ typedef enum
 #define MOVE_LINE_UP      "lnu"
 #define MOVE_LINE_DOWN    "lnd"
 
+typedef enum
+{
+    ARG_UINT,
+    //ARG_STRING
+} CommandArgType;
+
 typedef struct
 {
+    void *value;
+    CommandArgType type;
+    bool needed;
+} CommmandArg;
+
+da_decl(CommmandArg, CommmandArgs);
+
+typedef struct Command // TODO: forse cosi'
+{
+    char *name;
     CommandType type;
-    Strings args;
+    CommmandArgs args;
+    struct Commands {
+        struct Command *items;
+        size_t count;
+        size_t capacity;
+        size_t factor;
+    } subcmds;
+    size_t n;
 } Command;
+typedef struct Commands Commands;
 
-// TODO: forse cosi' si puo' fare??? non lo so e' difficilissimo
-//typedef enum
-//{
-//    ARG_UINT,
-//    //ARG_STRING
-//} CommandArgType;
-//
-//typedef struct
-//{
-//    void *value;
-//    CommandArgType type;
-//    bool needed;
-//} CommmandArg;
-//
-//typedef struct Command // TODO: forse cosi'
-//{
-//    char *name;
-//    CommandType type;
-//    CommmandArg *args;
-//    struct Command *subcmds;
-//} Command;
-
-da_decl(Command, Commands);
-
-void free_commands(Commands *cmds)
-{
-    for (size_t i = 0; i < cmds->count; i++) {
-        Command *cmd = &cmds->items[i];
-        for (size_t j = 0; j < cmd->args.count; j++) {
-            free(cmd->args.items[j]);
-        }
-        if (cmd->args.count > 0) da_free(&cmd->args);
-    }
-    da_free(cmds);
-}
-
-void print_commands(const Commands *cmds)
-{
-    log_this("Commands:");
-    for (size_t i = 0; i < cmds->count; i++) {
-        const Command *cmd = &cmds->items[i];
-        log_this("%d. %d", i, cmd->type);
-        if (cmd->args.count > 0) log_this("args:");
-        for (size_t j = 0; j < cmd->args.count; j++) {
-            char *arg = cmd->args.items[j];
-            log_this(" - %d. %s", j, arg);
-        }
-    }
-}
+// NOTE: all commands are stored in here
+Commands commands = {0};
 
 CommandType parse_cmdtype(char *type, size_t *index) // TODO: search in user_cmds_names and return USER_DEFINED if found
 {
@@ -680,8 +655,8 @@ CommandType parse_cmdtype(char *type, size_t *index) // TODO: search in user_cmd
     else if (streq(type, MOVE_LINE_UP))      return BUILTIN_MOVE_LINE_UP;
     else if (streq(type, MOVE_LINE_DOWN))    return BUILTIN_MOVE_LINE_DOWN;
     else {
-        for (size_t i = 0; i < user_cmds_names.count; i++) {
-            if (streq(type, user_cmds_names.items[i])) {
+        for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
+            if (streq(type, commands.items[i].name)) {
                 *index = i;
                 return USER_DEFINED;
             }
@@ -689,6 +664,62 @@ CommandType parse_cmdtype(char *type, size_t *index) // TODO: search in user_cmd
         return UNKNOWN;
     }
 }
+
+void add_builtin_command(char *name, CommandType type, CommmandArgs args)
+{
+    Command cmd = {
+        .name = name,
+        .type = type,
+        .args = args,
+    };
+    da_push(&commands, cmd);
+}
+
+void add_user_command(char *name, CommmandArgs args, Commands subcmds, size_t n)
+{
+    Command cmd = {
+        .name = name,
+        .type = USER_DEFINED + commands.count, // NOTE: index = cmd.type - USER_DEFINED
+        .args = args,
+        .subcmds = subcmds,
+        .n = n
+    };
+    da_push(&commands, cmd);
+}
+
+// TODOOOOO AAAAAAAAAAHHHHHHHHHHHH NON CAPISCO NIENTE
+// 0. builtin0         // 0. builtin0 (0)
+// 1. builtin1         // 1. builtin1 (1)
+// 2. builtin2         // 2. builtin2 (2)
+// 3. builtin_count    // 3. userdefined0 (5)
+// 4. unknown          // 4. userdefined1 (6)
+// 5. user_defined     // 
+
+//void free_commands(Commands *cmds)
+//{
+//    for (size_t i = 0; i < cmds->count; i++) {
+//        Command *cmd = &cmds->items[i];
+//        for (size_t j = 0; j < cmd->args.count; j++) {
+//            free(cmd->args.items[j]);
+//        }
+//        if (cmd->args.count > 0) da_free(&cmd->args);
+//    }
+//    da_free(cmds);
+//}
+
+//void print_commands(const Commands *cmds)
+//{
+//    log_this("Commands:");
+//    for (size_t i = 0; i < cmds->count; i++) {
+//        const Command *cmd = &cmds->items[i];
+//        log_this("%d. %d", i, cmd->type);
+//        if (cmd->args.count > 0) log_this("args:");
+//        for (size_t j = 0; j < cmd->args.count; j++) {
+//            char *arg = cmd->args.items[j];
+//            log_this(" - %d. %s", j, arg);
+//        }
+//    }
+//}
 
 Commands parse_cmds(char *cmds_str)
 {
@@ -699,18 +730,19 @@ Commands parse_cmds(char *cmds_str)
     char *cmd_str = strtok_r(cmds_str, " \t", &saveptr_cmds);
     while (cmd_str != NULL) {
         Command cmd = {0};
-        da_init(&cmd.args, 2, DA_DEFAULT_FAC);
-        char *args = strchr(cmd_str, '.');
-        if (args != NULL) {
-            *args = '\0';
-            args++;
-            if (!strchr(args, ',')) {
-                da_push(&cmd.args, strdup(args));
+        Strings args = {0};
+        da_init(&args, 2, DA_DEFAULT_FAC);
+        char *args_str = strchr(cmd_str, '.');
+        if (args_str != NULL) {
+            *args_str = '\0';
+            args_str++;
+            if (!strchr(args_str, ',')) {
+                da_push(&args, strdup(args_str));
             } else {
                 char *saveptr_args;
-                char *arg = strtok_r(args, ",", &saveptr_args);
+                char *arg = strtok_r(args_str, ",", &saveptr_args);
                 while (arg != NULL) {
-                    da_push(&cmd.args, strdup(arg));
+                    da_push(&args, strdup(arg));
                     arg = strtok_r(NULL, ",", &saveptr_args);
                 }
             }
@@ -753,7 +785,7 @@ void load_config()
     }
 
     ConfigFields remaining_fields = {0};
-    da_default(&remaining_fields);
+    da_init(&remaining_fields, 2, DA_DEFAULT_FAC);
     ConfigField __field;
 
     ADD_CONFIG_FIELD(quit_times,   FIELD_UINT);
@@ -768,17 +800,15 @@ void load_config()
     ConfigFields inserted_fields = {0};
     da_default(&inserted_fields);
 
-    // builtin_cmds_names and user_cmds_names
-    da_init(&builtin_cmds_names, BUILTIN_CMDS_COUNT-1, DA_DEFAULT_FAC);
+    // commands initialization
+    da_init(&commands, BUILTIN_CMDS_COUNT-1, DA_DEFAULT_FAC);
     static_assert(BUILTIN_CMDS_COUNT == 6, "Add all builtin commands in builtin_cmds_names");
-    da_push(&builtin_cmds_names, MOVE_CURSOR_UP);
-    da_push(&builtin_cmds_names, MOVE_CURSOR_DOWN);
-    da_push(&builtin_cmds_names, MOVE_CURSOR_LEFT);
-    da_push(&builtin_cmds_names, MOVE_CURSOR_RIGHT);
-    da_push(&builtin_cmds_names, MOVE_LINE_UP);
-    da_push(&builtin_cmds_names, MOVE_LINE_DOWN);
-
-    da_init(&user_cmds_names, 2, DA_DEFAULT_FAC);
+    add_builtin_command(MOVE_CURSOR_UP,    BUILTIN_MOVE_CURSOR_UP,    (CommmandArgs){0});
+    add_builtin_command(MOVE_CURSOR_DOWN,  BUILTIN_MOVE_CURSOR_DOWN,  (CommmandArgs){0});
+    add_builtin_command(MOVE_CURSOR_LEFT,  BUILTIN_MOVE_CURSOR_LEFT,  (CommmandArgs){0});
+    add_builtin_command(MOVE_CURSOR_RIGHT, BUILTIN_MOVE_CURSOR_RIGHT, (CommmandArgs){0});
+    add_builtin_command(MOVE_LINE_UP,      BUILTIN_MOVE_LINE_UP,      (CommmandArgs){0});
+    add_builtin_command(MOVE_LINE_DOWN,    BUILTIN_MOVE_LINE_DOWN,    (CommmandArgs){0});
 
     ssize_t res; 
     size_t len;
@@ -805,6 +835,8 @@ void load_config()
 
         char *colon = NULL;
         if (*line == '#') {
+            s_push_cstr(&config_log, "TODO: add user defined command\n");
+            continue;
             line++;
             colon = strchr(line, ':');
             if (colon == NULL) {
@@ -813,16 +845,16 @@ void load_config()
                 *colon = '\0';
                 char *cmd_name = line;
                 bool already_defined = false;
-                for (size_t i = 0; i < builtin_cmds_names.count; i++) {
-                    if (streq(cmd_name, builtin_cmds_names.items[i])) {
+                for (size_t i = 0; i < BUILTIN_CMDS_COUNT; i++) {
+                    if (streq(cmd_name, commands.items[i].name)) {
                         s_push_fstr(&config_log, "ERROR: redeclaration of builtin command `%s`", cmd_name); 
                         already_defined = true;
                         break;
                     }
                 }
                 if (already_defined) continue;
-                for (size_t i = 0; i < user_cmds_names.count; i++) {
-                    if (streq(cmd_name, user_cmds_names.items[i])) {
+                for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
+                    if (streq(cmd_name, commands.items[i].name)) {
                         s_push_fstr(&config_log, "ERROR: redeclaration of user defined command `%s`", cmd_name); 
                         already_defined = true;
                         break;
@@ -832,7 +864,7 @@ void load_config()
                 char *cmds = colon+1;
                 Commands cmd_def = parse_cmds(cmds); // TODO: add to user defined commands list (bisogna cambiare un po' i nomi e la struttura del comando che avra' bisogno di un nome con cui essere richiamato ed eventuali argomenti)
                 (void)cmd_def; // TODO
-                da_push(&user_cmds_names, strdup(cmd_name));
+                add_user_command(strdup(cmd_name), (CommmandArgs){0}, (Commands){0}, 1); // TODO
             }
         } else if ((colon = strchr(line, ':')) != NULL) {
             *colon = '\0';
@@ -1236,7 +1268,7 @@ void execute_cmd() // TODO: al posto di N_TIMES parsare i primi caratteri e se s
                 abort();
         }
     }
-    free_commands(&cmds);
+    //free_commands(&cmds);
 }
 
 void insert_char(char c)
