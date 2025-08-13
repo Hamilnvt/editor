@@ -4,7 +4,9 @@
     - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
     - coda dei messaggi da mostrare
+        >  shortcut per mostrare il messaggio successivo
     - numeri della linea e relativi/assoluti (config)
+        > comando per spostarsi ad una riga precisa
     - config:
       > aggiungere una descrizione ai campi da mostrare in caso di errore/assenza del campo
         - si genera nel config file di default e poi si mostra lo stesso errore, quindi deve stare da qualche parte
@@ -37,6 +39,7 @@
 #include <signal.h>
 #include <time.h>
 #include <fcntl.h>
+#include <inttypes.h>
 
 #define STRINGS_IMPLEMNTATION
 #include "../libs/strings.h"
@@ -645,7 +648,9 @@ typedef struct Commands Commands;
 // NOTE: all commands are stored in here
 Commands commands = {0};
 
-CommandType parse_cmdtype(char *type, size_t *index) // TODO: search in user_cmds_names and return USER_DEFINED if found
+#define USER_CMDS_COUNT (commands.count - BUILTIN_CMDS_COUNT)
+
+CommandType parse_cmdtype(char *type)
 {
     static_assert(BUILTIN_CMDS_COUNT == 6, "Parse all commands in parse_cmd");
     if      (streq(type, MOVE_CURSOR_UP))    return BUILTIN_MOVE_CURSOR_UP;
@@ -656,10 +661,8 @@ CommandType parse_cmdtype(char *type, size_t *index) // TODO: search in user_cmd
     else if (streq(type, MOVE_LINE_DOWN))    return BUILTIN_MOVE_LINE_DOWN;
     else {
         for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
-            if (streq(type, commands.items[i].name)) {
-                *index = i;
-                return USER_DEFINED;
-            }
+            if (streq(type, commands.items[i].name))
+                return USER_DEFINED + i - BUILTIN_CMDS_COUNT;
         }
         return UNKNOWN;
     }
@@ -678,8 +681,8 @@ void add_builtin_command(char *name, CommandType type, CommmandArgs args)
 void add_user_command(char *name, CommmandArgs args, Commands subcmds, size_t n)
 {
     Command cmd = {
-        .name = name,
-        .type = USER_DEFINED + commands.count, // NOTE: index = cmd.type - USER_DEFINED
+        .name = strdup(name),
+        .type = USER_DEFINED + commands.count - BUILTIN_CMDS_COUNT,
         .args = args,
         .subcmds = subcmds,
         .n = n
@@ -687,13 +690,7 @@ void add_user_command(char *name, CommmandArgs args, Commands subcmds, size_t n)
     da_push(&commands, cmd);
 }
 
-// TODOOOOO AAAAAAAAAAHHHHHHHHHHHH NON CAPISCO NIENTE
-// 0. builtin0         // 0. builtin0 (0)
-// 1. builtin1         // 1. builtin1 (1)
-// 2. builtin2         // 2. builtin2 (2)
-// 3. builtin_count    // 3. userdefined0 (5)
-// 4. unknown          // 4. userdefined1 (6)
-// 5. user_defined     // 
+size_t get_command_index(const Command *cmd) { return cmd->type - USER_DEFINED + BUILTIN_CMDS_COUNT; }
 
 //void free_commands(Commands *cmds)
 //{
@@ -721,15 +718,41 @@ void add_user_command(char *name, CommmandArgs args, Commands subcmds, size_t n)
 //    }
 //}
 
-Commands parse_cmds(char *cmds_str)
+typedef struct
 {
-    Commands cmds = {0};
-    da_init(&cmds, 2, DA_DEFAULT_FAC);
+    size_t row;
+    size_t col;
+} Location;
 
+//TODO:
+// - track location
+// - si puo' fare che se c'e' un errore continua a parsare e lo segnala solo (ritorna un da di errori)
+char *parse_cmds(char *cmds_str, Commands *cmds, Location *loc)
+{
+    da_init(cmds, 2, DA_DEFAULT_FAC);
     char *saveptr_cmds;
     char *cmd_str = strtok_r(cmds_str, " \t", &saveptr_cmds);
     while (cmd_str != NULL) {
         Command cmd = {0};
+
+        if (isdigit(*cmd_str)) {
+            char *end_of_n;
+            errno = 0;
+            long n = strtol(cmd_str, &end_of_n, 10);
+            if (loc) loc->col += end_of_n - cmd_str;
+            if (n <= 0) {
+                char *error = malloc(sizeof(char)*256);
+                if (sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n) == -1) {
+                    fprintf(stderr, CRNL "Could not allocate memoy, buy more RAM" CRNL);
+                    exit(1);
+                } else {
+                    return error;
+                }
+            } else cmd.n = n;
+            cmd_str = end_of_n;
+        } else cmd.n = 1;
+        log_this("command multiplicity: %zu", cmd.n);
+
         Strings args = {0};
         da_init(&args, 2, DA_DEFAULT_FAC);
         char *args_str = strchr(cmd_str, '.');
@@ -747,13 +770,22 @@ Commands parse_cmds(char *cmds_str)
                 }
             }
         }
-        size_t user_cmd_index;
-        cmd.type = parse_cmdtype(cmd_str, &user_cmd_index);
-        // TODO: push the user defined command at index user_cmd_index
-        da_push(&cmds, cmd);
+        cmd.type = parse_cmdtype(cmd_str);
+        if (cmd.type == UNKNOWN) {
+            char *error = malloc(sizeof(char)*256);
+            // TODO: track location
+            if (sprintf(error, "unknown command `%s`", cmd_str) == -1) {
+                fprintf(stderr, CRNL "Could not allocate memoy, buy more RAM" CRNL);
+                exit(1);
+            } else {
+                return error;
+            }
+        }
+        // TODO: args
+        da_push(cmds, cmd);
         cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
     }
-    return cmds;
+    return NULL;
 }
 
 #define CONFIG_PATH ".config/editor/config"
@@ -777,8 +809,10 @@ void load_config()
             exit(1);
         }
 
-        fprintf(config_file, "quit_times: %zu\n", default_quit_times);
-        fprintf(config_file, "msg_lifetime: %zu\n", default_msg_lifetime);
+        fprintf(config_file, "quit_times: %zu   // times you need to press CTRL-q before exiting without saving\n",
+                default_quit_times);
+        fprintf(config_file, "msg_lifetime: %zu // time in seconds of the duration of a message\n",
+                default_msg_lifetime);
 
         s_push_fstr(&config_log, "NOTE: default config file has been created\n\n");
         rewind(config_file);
@@ -802,7 +836,7 @@ void load_config()
 
     // commands initialization
     da_init(&commands, BUILTIN_CMDS_COUNT-1, DA_DEFAULT_FAC);
-    static_assert(BUILTIN_CMDS_COUNT == 6, "Add all builtin commands in builtin_cmds_names");
+    static_assert(BUILTIN_CMDS_COUNT == 6, "Add all builtin commands in commands");
     add_builtin_command(MOVE_CURSOR_UP,    BUILTIN_MOVE_CURSOR_UP,    (CommmandArgs){0});
     add_builtin_command(MOVE_CURSOR_DOWN,  BUILTIN_MOVE_CURSOR_DOWN,  (CommmandArgs){0});
     add_builtin_command(MOVE_CURSOR_LEFT,  BUILTIN_MOVE_CURSOR_LEFT,  (CommmandArgs){0});
@@ -810,19 +844,29 @@ void load_config()
     add_builtin_command(MOVE_LINE_UP,      BUILTIN_MOVE_LINE_UP,      (CommmandArgs){0});
     add_builtin_command(MOVE_LINE_DOWN,    BUILTIN_MOVE_LINE_DOWN,    (CommmandArgs){0});
 
+    Location loc = {0};
     ssize_t res; 
     size_t len;
     char *full_line = NULL;
     while ((res = getline(&full_line, &len, config_file)) != -1) {
         res--;
-        if (res == 0) continue;
+        if (res == 0) {
+            loc.row++;
+            loc.col = 0;
+            continue;
+        }
         char *line = full_line;
         line[res] = '\0';
         while (isspace(*line)) {
             line++;
             res--;
+            loc.col++;
         }
-        if (res == 0) continue;
+        if (res == 0) {
+            loc.row++;
+            loc.col = 0;
+            continue;
+        }
         char *end = line+res-1;
         while (isspace(*end)) {
             end--;
@@ -835,11 +879,11 @@ void load_config()
 
         char *colon = NULL;
         if (*line == '#') {
-            s_push_cstr(&config_log, "TODO: add user defined command\n");
-            continue;
             line++;
+            loc.col++;
             colon = strchr(line, ':');
             if (colon == NULL) {
+                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                 s_push_fstr(&config_log, "ERROR: invalid command, it should be of the form #name: commands...\n");
             } else {
                 *colon = '\0';
@@ -847,30 +891,47 @@ void load_config()
                 bool already_defined = false;
                 for (size_t i = 0; i < BUILTIN_CMDS_COUNT; i++) {
                     if (streq(cmd_name, commands.items[i].name)) {
+                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                         s_push_fstr(&config_log, "ERROR: redeclaration of builtin command `%s`", cmd_name); 
                         already_defined = true;
                         break;
                     }
                 }
-                if (already_defined) continue;
+                if (already_defined) {
+                    loc.col++;
+                    continue;
+                }
                 for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
                     if (streq(cmd_name, commands.items[i].name)) {
+                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                         s_push_fstr(&config_log, "ERROR: redeclaration of user defined command `%s`", cmd_name); 
                         already_defined = true;
                         break;
                     }
                 }
-                if (already_defined) continue;
+                if (already_defined) {
+                    loc.col++;
+                    continue;
+                }
                 char *cmds = colon+1;
-                Commands cmd_def = parse_cmds(cmds); // TODO: add to user defined commands list (bisogna cambiare un po' i nomi e la struttura del comando che avra' bisogno di un nome con cui essere richiamato ed eventuali argomenti)
-                (void)cmd_def; // TODO
-                add_user_command(strdup(cmd_name), (CommmandArgs){0}, (Commands){0}, 1); // TODO
+                Commands cmd_def = {0};
+                char *parse_error = parse_cmds(cmds, &cmd_def, &loc);
+                if (parse_error != NULL) {
+                    s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                    s_push_fstr(&config_log, "ERROR: %s\n", parse_error);
+                    free(parse_error);
+                } else {
+                    add_user_command(cmd_name, (CommmandArgs){0}, cmd_def, 1); // TODO
+                }
             }
         } else if ((colon = strchr(line, ':')) != NULL) {
             *colon = '\0';
             char *field_name = line;
             char *field_value = colon+1;
-            while(isspace(*field_value)) field_value++;
+            while(isspace(*field_value)) {
+                loc.col++;
+                field_value++;
+            }
 
             size_t i = 0;
             bool found = false;
@@ -884,7 +945,9 @@ void load_config()
                         case FIELD_UINT: {
                             size_t value = atoi(field_value);
                             if (value == 0) {
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                                 s_push_fstr(&config_log, "ERROR: field `%s` expects an integer greater than 0, but got `%s`\n", field_name, field_value);
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                                 s_push_fstr(&config_log, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
                                 *((size_t *)removed_field.ptr) = *((size_t *)removed_field.thefault);
                             } else {
@@ -904,6 +967,7 @@ void load_config()
                         //    }
                         //} break;
                         default:
+                            s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                             fprintf(stderr, "Unreachable field type in load_config\n");
                             abort();
                     }
@@ -916,18 +980,24 @@ void load_config()
                 i = 0;
                 while (!found && i < inserted_fields.count) {
                     if (streq(field_name, inserted_fields.items[i].name)) {
+                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                         s_push_fstr(&config_log, "ERROR: redeclaration of field `%s`\n", field_name);
                         found = true;
                     } else i++;
                 }
             }
 
-            if (!found) s_push_fstr(&config_log, "ERROR: unknown field `%s`\n", field_name);
-
+            if (!found) {
+                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                s_push_fstr(&config_log, "ERROR: unknown field `%s`\n", field_name);
+            }
         } else {
+            s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
             s_push_fstr(&config_log, "ERROR: I don't know what to do with `%s`\n", line);
-            // TODO: track and report location
         }
+
+        loc.row++;
+        loc.col = 0;
     }
     free(full_line);
 
@@ -956,7 +1026,7 @@ void load_config()
     if (!s_is_empty(config_log)) {
         s_push_null(&config_log);
         s_print(config_log);
-        printf("\n-- Press ENTER to continue --\n");
+        printf("\n\n-- Press ENTER to continue --\n");
         printf(ANSI_HIDE_CURSOR"\n");
         while (getc(stdin) != '\n')
             ;
@@ -1244,31 +1314,44 @@ void move_line_down()
     editor.dirty++;
 }
 
-void execute_cmd() // TODO: al posto di N_TIMES parsare i primi caratteri e se sono un numero usare quel numero come moltiplicità, cosi' si puo' scrivere 3lnd e spostera' la riga giu' di 3
-                   // - storia dei comandi usati, si scorre con ALT_k e ALT_j
+void execute_cmd(const Command *cmd) // TODO:
+                                     // - storia dei comandi usati, si scorre con ALT_k e ALT_j
+                                     // - questa funzione dovrebbe solo prendere un comando ed eseguirlo, il parsing della linea di comando deve essere fatto prima e poi si passa il comando parsato qua
 {
-    static_assert(BUILTIN_CMDS_COUNT == 6, "Implement all commands in execute_cmd");
-    Commands cmds = parse_cmds(editor.cmd.items);
-    for (size_t i = 0; i < cmds.count; i++) {
-        const Command *cmd = &cmds.items[i];
+    static_assert(BUILTIN_CMDS_COUNT == 6, "Execute all commands in execute_cmd");
+    for (size_t i = 0; i < cmd->n; i++ ) {
         switch (cmd->type)
         {
-            case BUILTIN_MOVE_CURSOR_UP   : N_TIMES move_cursor_up();    break;
-            case BUILTIN_MOVE_CURSOR_DOWN : N_TIMES move_cursor_down();  break; 
-            case BUILTIN_MOVE_CURSOR_LEFT : N_TIMES move_cursor_left();  break;
-            case BUILTIN_MOVE_CURSOR_RIGHT: N_TIMES move_cursor_right(); break;
-            case BUILTIN_MOVE_LINE_UP     : N_TIMES move_line_up();      break;
-            case BUILTIN_MOVE_LINE_DOWN   : N_TIMES move_line_down();    break;
-            case USER_DEFINED: set_message("TODO: execute user defined command"); break;
+            case BUILTIN_MOVE_CURSOR_UP   : move_cursor_up();    break;
+            case BUILTIN_MOVE_CURSOR_DOWN : move_cursor_down();  break; 
+            case BUILTIN_MOVE_CURSOR_LEFT : move_cursor_left();  break;
+            case BUILTIN_MOVE_CURSOR_RIGHT: move_cursor_right(); break;
+            case BUILTIN_MOVE_LINE_UP     : move_line_up();      break;
+            case BUILTIN_MOVE_LINE_DOWN   : move_line_down();    break;
             case UNKNOWN: set_message("Unknown command `%s`", editor.cmd.items); break;
-
             case BUILTIN_CMDS_COUNT:
+                fprintf(stderr, CRNL "Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
+                exit(1);
+            case USER_DEFINED:
             default:
-                fprintf(stderr, "Unreachable command type in execute_cmd\n");
-                abort();
+                if (cmd->type >= USER_DEFINED && cmd->type < USER_DEFINED + USER_CMDS_COUNT) {
+                    Command *user_cmd = &commands.items[get_command_index(cmd)];
+                    set_message("TODO: execute user defined command `%s`", user_cmd->name);
+                    log_this("execute user defined command `%s`", user_cmd->name);
+                    Command *subcmd = NULL;
+                    for (size_t i = 0; i < user_cmd->subcmds.count; i++) {
+                        subcmd = &user_cmd->subcmds.items[i];
+                        log_this("subcommand %zu:", i);
+                        execute_cmd(subcmd);
+                    }
+                    break;
+                } else {
+                    fprintf(stderr, CRNL "Unreachable command type %u in execute_cmd" CRNL, cmd->type);
+                    getc(stdin);
+                    exit(1);
+                }
         }
     }
-    //free_commands(&cmds);
 }
 
 void insert_char(char c)
@@ -1277,7 +1360,16 @@ void insert_char(char c)
         if (c == '\n') {
             s_push_null(&editor.cmd);
             editor.in_cmd = false;
-            execute_cmd();
+            Commands cmds = {0};
+            char *parse_error = parse_cmds(editor.cmd.items, &cmds, NULL);
+            if (parse_error != NULL) {
+                set_message("ERROR: %s", parse_error);
+                free(parse_error);
+            } else {
+                for (size_t i = 0; i < cmds.count; i++)
+                    execute_cmd(&cmds.items[i]);
+            }
+            //free_commands(&cmds);
         } else {
             da_insert(&editor.cmd, c, (int)(editor.cmd_pos));
             editor.cmd_pos++;
@@ -1408,6 +1500,7 @@ void delete_word()
         x--;
         editor.cx--;
     }
+    editor.dirty++;
 }
 
 void command()
