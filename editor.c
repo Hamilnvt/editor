@@ -3,6 +3,7 @@
 /* TODO:
     
     - forse devo fermarmi un attimo e capire come voglio parsare i comandi
+        > non solo i comandi definiti dall'utente hanno bisogno di argomenti, ma anche quelli builtin
 
     - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
@@ -610,6 +611,7 @@ typedef enum
     BUILTIN_INSERT,
     BUILTIN_CMDS_COUNT,
     UNKNOWN,
+    CLI,
     USER_DEFINED,
 } CommandType;
 
@@ -669,7 +671,7 @@ CommandType parse_cmdtype(char *type)
     else if (streq(type, MOVE_LINE_DOWN))    return BUILTIN_MOVE_LINE_DOWN;
     else if (streq(type, INSERT))            return BUILTIN_INSERT;
     else {
-        for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
+        for (size_t i = USER_DEFINED; i < commands.count; i++) {
             if (streq(type, commands.items[i].name))
                 return USER_DEFINED + i - BUILTIN_CMDS_COUNT;
         }
@@ -699,7 +701,12 @@ void add_user_command(char *name, CommandArgs args, Commands subcmds)
     da_push(&commands, cmd);
 }
 
-size_t get_command_index(const Command *cmd) { return cmd->type - USER_DEFINED + BUILTIN_CMDS_COUNT; }
+int get_command_index(const Command *cmd)
+{
+    if (cmd->type >= USER_DEFINED) return cmd->type - USER_DEFINED + BUILTIN_CMDS_COUNT;
+    else if (cmd->type >= 0 && cmd->type < BUILTIN_CMDS_COUNT) return cmd->type;
+    else return -1;
+}
 
 //void free_commands(Commands *cmds)
 //{
@@ -763,7 +770,7 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
 
         Strings args = {0};
         da_init(&args, 2, DA_DEFAULT_FAC);
-        da_init(cmd_args, 2, DA_DEFAULT_FAC);
+        if (cmd_args) da_init(cmd_args, 2, DA_DEFAULT_FAC);
         char *args_str = strchr(cmd_str, '.');
         if (args_str != NULL) {
             *args_str = '\0';
@@ -790,12 +797,43 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
                 return error;
             }
         }
-        // TODO: args
-        log_this("args:");
-        for (size_t i = 0; i < args.count; i++) {
-            log_this("- %zu: %s", i, args.items[i]);
+
+        // TODO
+        if (cmd_args) {
+            log_this("args:");
+            int index = get_command_index(&cmd);
+            const Command *ref_cmd = NULL;
+            if (index == -1) {
+                set_message("TODO: invalid command");
+            } else {
+                 ref_cmd = &commands.items[index];
+            }
+            CommandArg *ref_arg;
+            char *arg;
+            for (size_t i = 0; i < args.count; i++) {
+                ref_arg = &ref_cmd->args.items[i];
+                arg = args.items[i];
+                log_this("- %zu: %s", i, arg);
+                if (ref_arg->needed) {
+                    switch (ref_arg->type)
+                    {
+                        case ARG_UINT:
+                            log_this("TODO: parse uint arg `%s`", arg);
+                            break;
+                        case ARG_STRING:
+                            log_this("TODO: parse string arg `%s`", arg);
+                            break;
+                        default:
+                            fprintf(stderr, "Unreachable command arg type %u in parse_cmds\n", ref_arg->type);
+                            exit(1);
+                    }
+                } else {
+                    // TODO: simply copy the argument
+                }
+            }
+            log_this("-----");
         }
-        log_this("-----");
+
         da_push(cmds, cmd);
         cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
     }
@@ -1333,16 +1371,19 @@ void insert_char(char c)
         if (c == '\n') {
             s_push_null(&editor.cmd);
             editor.in_cmd = false;
-            Commands cmds = {0};
-            CommandArgs cmd_args = {0};
-            char *parse_error = parse_cmds(editor.cmd.items, &cmds, &cmd_args, NULL);
+            Command cli_cmd = {
+                .name = "cli command",
+                .type = CLI,
+                .n = 1 // TODO
+            };
+            Commands subcmds = {0};
+            char *parse_error = parse_cmds(editor.cmd.items, &subcmds, NULL, NULL);
             if (parse_error != NULL) {
                 set_message("ERROR: %s", parse_error);
                 free(parse_error);
             } else {
-                // TODO: maybe construct the Command with cmd_args and (sub)cmds
-                for (size_t i = 0; i < cmds.count; i++)
-                    execute_cmd(&cmds.items[i]);
+                cli_cmd.subcmds = subcmds;
+                execute_cmd(&cli_cmd);
             }
             //free_commands(&cmds);
         } else {
@@ -1414,6 +1455,13 @@ void execute_cmd(const Command *cmd) // TODO:
             case BUILTIN_CMDS_COUNT:
                 fprintf(stderr, CRNL "Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
                 exit(1);
+            case CLI:
+                Command *subcmd = NULL;
+                for (size_t i = 0; i < cmd->subcmds.count; i++) {
+                    subcmd = &cmd->subcmds.items[i];
+                    execute_cmd(subcmd);
+                }
+                break;
             case USER_DEFINED:
             default:
                 if (cmd->type >= USER_DEFINED && cmd->type < USER_DEFINED + USER_CMDS_COUNT) {
