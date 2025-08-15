@@ -657,6 +657,15 @@ Commands commands = {0};
 
 #define USER_CMDS_COUNT (commands.count - BUILTIN_CMDS_COUNT)
 
+bool expect_n_arguments(const Command *cmd, size_t n)
+{
+    if (cmd->args.count != n) {
+        set_message("ERROR: command `%s` expects %zu argument%s, but got %zu", cmd->name, n, n == 1 ? "" : "s", cmd->args.count);
+        // TODO: mostrare anche quali sono i tipi e i nomi degli argomenti
+        return false;
+    } else return true;
+}
+
 CommandType parse_cmdtype(char *type)
 {
     static_assert(BUILTIN_CMDS_COUNT == 7, "Parse all commands in parse_cmd");
@@ -793,14 +802,14 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
             } else return error;
         }
 
+        int index = get_command_index(&cmd);
+        if (index == -1) {
+            fprintf(stderr, "TODO: invalid command\n");
+            exit(1);
+        }
+        const Command *ref_cmd = &commands.items[index];
+        cmd.name = ref_cmd->name;
         if (cmd_args) {
-            int index = get_command_index(&cmd);
-            const Command *ref_cmd = NULL;
-            if (index == -1) {
-                fprintf(stderr, "TODO: invalid command\n");
-                exit(1);
-            }
-            ref_cmd = &commands.items[index];
             da_init(&cmd.args, ref_cmd->args.count, DA_DEFAULT_FAC);
             CommandArg *ref_arg;
             char *arg;
@@ -816,6 +825,25 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
                             log_this("TODO: parse uint arg `%s`", arg);
                             break;
                         case ARG_STRING:
+                            // TODO: allora, devo farlo a mano e devo prima cercare negli argomenti se ce ne sono ancora (caso "ciao,come,stai"), altrimenti continuo con la line (caso "ciao come stai"), poi salvo la fine in saveptr_cmds e da li' si continua con gli altri comandi
+                            if (*arg == '\"') {
+                                log_this("quoted string beginning with `%s`", arg);
+                                size_t arglen = strlen(arg);
+                                if (arglen == 1 || arg[arglen-1] != '\"') {
+                                    log_this("quoted string has multiple words", arg);
+                                    char *next_str_word;
+                                    while ((next_str_word = strtok_r(NULL, " \t", &saveptr_cmds)) != NULL ) {
+                                        log_this("Searching for \" in `%s`", next_str_word);
+                                        strcat(arg, next_str_word);
+                                        if (strchr(next_str_word, '\"') != NULL) break;
+                                    }
+                                    if (next_str_word == NULL) {
+                                        // TODO: report location
+                                        return strdup("unclosed dquote");
+                                    }
+                                } else log_this("quoted string ends in the same word", arg);
+                            }
+                            // TODO: add support for '\\n' in string arg
                             actual_arg.value = strdup(arg); // TODO: rember to free
                             break;
                         default:
@@ -825,7 +853,6 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
                     da_push(&cmd.args, actual_arg);
                 } else da_push(&cmd.args, *ref_arg);
             }
-            log_this("-----");
         }
 
         da_push(cmds, cmd);
@@ -930,6 +957,11 @@ void load_config()
 
         char *comment = strstr(line, "//");
         if (comment != NULL) *comment = '\0';
+        if (strlen(line) == 0) {
+            loc.row++;
+            loc.col = 0;
+            continue;
+        }
 
         char *colon = NULL;
         if (*line == '#') {
@@ -1149,7 +1181,7 @@ void open_file(char *filename)
 }
 
 // TODO: now it's trivial
-void move_cursor_up() 
+void builtin_move_cursor_up() 
 {
     if (editor.cy == 0 && editor.page != 0) editor.rowoff--; // TODO: deve cambiare anche la pagina
     if (editor.cy > 0) editor.cy -= 1;
@@ -1159,7 +1191,7 @@ void move_cursor_up()
 }
 
 // TODO: now it's trivial
-void move_cursor_down()
+void builtin_move_cursor_down()
 { 
     //if ((editor.rowoff+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.rowoff+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'rowoff in questo caso
     if (editor.cy == editor.screenrows-1 && editor.page != N_PAGES-1) editor.rowoff++; // TODO: deve cambiare anche la pagina
@@ -1170,7 +1202,7 @@ void move_cursor_down()
 }
 
 // TODO: now it's trivial
-void move_cursor_left()
+void builtin_move_cursor_left()
 {
     if (editor.in_cmd) {
         if (editor.cmd_pos > 0) editor.cmd_pos -= 1;
@@ -1182,7 +1214,7 @@ void move_cursor_left()
 }
 
 // TODO: now it's trivial
-void move_cursor_right()
+void builtin_move_cursor_right()
 {
     if (editor.in_cmd) {
         if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos += 1;
@@ -1342,7 +1374,7 @@ void insert_char_at(Row *row, size_t at, int c)
     }
 }
 
-void move_line_up()
+void builtin_move_line_up()
 {
     size_t y = CURRENT_Y_POS;
     if (y == 0) return;
@@ -1353,7 +1385,7 @@ void move_line_up()
     editor.dirty++;
 }
 
-void move_line_down()
+void builtin_move_line_down()
 {
     size_t y = CURRENT_Y_POS;
     if (y == editor.screenrows-1) return;
@@ -1439,6 +1471,18 @@ void insert_char(char c)
     }
 }
 
+void builtin_insert(const Command *cmd)
+{
+    if (!expect_n_arguments(cmd, 1)) return;
+
+    char *str = cmd->args.items[0].value;
+    size_t len = strlen(str);
+    for (size_t j = 0; j < len; j++) {
+        insert_char(str[j]);
+    }
+
+}
+
 void execute_cmd(const Command *cmd) // TODO:
                                      // - storia dei comandi usati, si scorre con ALT_k e ALT_j
                                      // - questa funzione dovrebbe solo prendere un comando ed eseguirlo, il parsing della linea di comando deve essere fatto prima e poi si passa il comando parsato qua
@@ -1447,20 +1491,13 @@ void execute_cmd(const Command *cmd) // TODO:
     for (size_t i = 0; i < cmd->n; i++ ) {
         switch (cmd->type)
         {
-            case BUILTIN_MOVE_CURSOR_UP   : move_cursor_up();    break;
-            case BUILTIN_MOVE_CURSOR_DOWN : move_cursor_down();  break; 
-            case BUILTIN_MOVE_CURSOR_LEFT : move_cursor_left();  break;
-            case BUILTIN_MOVE_CURSOR_RIGHT: move_cursor_right(); break;
-            case BUILTIN_MOVE_LINE_UP     : move_line_up();      break;
-            case BUILTIN_MOVE_LINE_DOWN   : move_line_down();    break;
-            case BUILTIN_INSERT           :
-                char *str = cmd->args.items[0].value;
-                size_t len = strlen(str);
-                for (size_t j = 0; j < len; j++) {
-                    insert_char(str[j]);
-                }
-                break;
-
+            case BUILTIN_MOVE_CURSOR_UP   : builtin_move_cursor_up();    break;
+            case BUILTIN_MOVE_CURSOR_DOWN : builtin_move_cursor_down();  break; 
+            case BUILTIN_MOVE_CURSOR_LEFT : builtin_move_cursor_left();  break;
+            case BUILTIN_MOVE_CURSOR_RIGHT: builtin_move_cursor_right(); break;
+            case BUILTIN_MOVE_LINE_UP     : builtin_move_line_up();      break;
+            case BUILTIN_MOVE_LINE_DOWN   : builtin_move_line_down();    break;
+            case BUILTIN_INSERT           : builtin_insert(cmd);         break;
             case UNKNOWN: set_message("Unknown command `%s`", cmd->name); break;
             case BUILTIN_CMDS_COUNT:
                 fprintf(stderr, CRNL "Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
@@ -1611,10 +1648,10 @@ void process_pressed_key(void)
             has_inserted_number = true;
             break;
 
-        case ALT_k: N_TIMES move_cursor_up();    break;
-        case ALT_j: N_TIMES move_cursor_down();  break;
-        case ALT_h: N_TIMES move_cursor_left();  break;
-        case ALT_l: N_TIMES move_cursor_right(); break;
+        case ALT_k: N_TIMES builtin_move_cursor_up();    break;
+        case ALT_j: N_TIMES builtin_move_cursor_down();  break;
+        case ALT_h: N_TIMES builtin_move_cursor_left();  break;
+        case ALT_l: N_TIMES builtin_move_cursor_right(); break;
 
         case ALT_K: move_cursor_begin_of_screen(); break;
         case ALT_J: move_cursor_end_of_screen();   break;
