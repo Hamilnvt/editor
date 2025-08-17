@@ -1,0 +1,35 @@
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Go forward one command: `(null)`
+Go forward one command: `(null)`
+Go back one command: `(null)`
+Go back one command: ``
+Go forward one command: ``
+Go forward one command: `d`
+Go forward one command: `u`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+c0: `d`
+c0: `d`
+c1: `d`
+c0: `d`
+c1: `d`
+c2: `u`
+c0: `d`
+c1: `d`
+c2: `u`
+c3: `2r`
+Go forward one command: `d`
+Go forward one command: `u`
+Go forward one command: `2r`
+Go back one command: `u`
+c0: `d`
+c1: `d`
+c2: `u`
+c3: `2r`
+c4: ``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+

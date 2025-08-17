@@ -8,19 +8,21 @@
         >  shortcut per mostrare il messaggio successivo
     - numeri della linea e relativi/assoluti (config)
         > comando per spostarsi ad una riga precisa
+    - comando che stampa l'elenco dei comandi (builtin + user defined)
     - config:
       > aggiungere una descrizione ai campi da mostrare in caso di errore/assenza del campo
         - si genera nel config file di default e poi si mostra lo stesso errore, quindi deve stare da qualche parte
-      > possibilita' di definire nel config file nuovi comandi come composizioni di quelli builtin (4 lu ld significa 4 volte lu poi ld, o pensare ad un'altra sintassi)
+      > sintassi dei comandi user defined
         - serve un terminatore del comando? (ad esempio ';')
+        - forse e' meglio che gli argomenti vengano passati tra parentesi
+            ad esempio => #cmd: c1(arg1, arg2) c2 c3(nome="palle sudate")
         - gestione degli argomenti dei comandi definiti dall'utente, magari $0 oppure {0}
             > esempio 1. #cmd: ciao sono {} il {} => `cmd.tanica,tastiere`
             > esempio 2. #cmd: daje.{0} => `cmd.roma`
             > esempio 3. #cmd: ciao.{nome} come stai => `cmd.mario` oppure `cmd.nome=mario`
             > esempio 4. #cmd: ciao.{nome=Tanica} come stai => `cmd` == `cmd.Tanica`
       > possibilita' di assegnare comandi a combinazioni di tasti (questo sembra essere molto difficile, non ho idea di come si possa fare)
-      > fare i comandi per le azioni base (salva, esci, spostati, ecc...)
-    - sistema di registrazione macro (a cui magari si puo' dare un nome e le si esegue come comandi o con shortcut)
+    - sistema di registrazione macro (comandi temporanei a cui magari si puo' dare un nome e le si esegue come comandi o con shortcut)
         > possibilita' di salvarli come comandi aggiungendoli direttamente al config
     - funzioni separate per la modifica della command line (altrimenti non si capisce niente)
       > cambiare anche process_pressed_key in modo da prendere solo gli input che valgono anche per il comando (altrimenti dovrei controllare in ogni funzione se si e' in_cmd e poi fare return
@@ -76,7 +78,7 @@ typedef struct
     size_t page;
 
     String message;
-    time_t msg_time;
+    time_t current_msg_time;
 
     String cmd;
     size_t cmd_pos;
@@ -132,6 +134,8 @@ typedef enum
     CTRL_J    = 10,
     CTRL_K    = 11,
     CTRL_L    = 12,
+    CTRL_N    = 14,
+    CTRL_P    = 16,
     CTRL_Q    = 17,
     CTRL_S    = 19,
     ESC       = 27,
@@ -197,7 +201,7 @@ void set_message(const char *fmt, ...)
     vsnprintf(buf, editor.screencols, fmt, ap);
     s_clear(&editor.message);
     s_push_cstr(&editor.message, buf);
-    editor.msg_time = time(NULL);
+    editor.current_msg_time = time(NULL);
     va_end(ap);
 }
 
@@ -213,7 +217,7 @@ void reset_terminal(void)
 
 void at_exit(void)
 {
-    s_free(&screen_buf);
+    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
     printf(ANSI_CLEAR_SCREEN);
     printf(ANSI_GO_HOME_CURSOR);
     reset_terminal();
@@ -246,7 +250,7 @@ int read_key()
     while ((nread = read(STDIN_FILENO, &c, 1)) == 0);
     if (nread == -1) exit(1); // TODO: report error (stdin probably failed)
 
-    while (true) { // TODO: perché?
+    while (true) { // TODO: perché while true?
         switch (c) {
         case ESC:    /* escape sequence */
             int seq[3] = {0};
@@ -503,7 +507,7 @@ void refresh_screen(void)
         s_push_str(&screen_buf, editor.cmd.items, editor.cmd.count);
     } else {
         size_t msglen = editor.message.count;
-        if (msglen && time(NULL)-editor.msg_time < config.msg_lifetime)
+        if (msglen && time(NULL)-editor.current_msg_time < config.msg_lifetime)
             s_push_str(&screen_buf, editor.message.items, msglen);
     }
 
@@ -599,6 +603,8 @@ void print_config()
 
 typedef enum
 {
+    BUILTIN_SAVE,
+    BUILTIN_QUIT, // TODO: command to immediately quit, without saving
     BUILTIN_MOVE_CURSOR_UP,
     BUILTIN_MOVE_CURSOR_DOWN,
     BUILTIN_MOVE_CURSOR_LEFT,
@@ -612,7 +618,10 @@ typedef enum
     USER_DEFINED,
 } CommandType;
 
+static_assert(BUILTIN_CMDS_COUNT == 9, "Associate a name to all builtin commands");
 /* NOTE: name of the builtin commands */
+#define SAVE              "s"
+#define QUIT              "q"
 #define MOVE_CURSOR_UP    "u"
 #define MOVE_CURSOR_DOWN  "d"
 #define MOVE_CURSOR_LEFT  "l"
@@ -653,7 +662,41 @@ typedef struct Command // TODO: forse cosi'
 typedef struct Commands Commands;
 
 // NOTE: all commands are stored in here
-Commands commands = {0};
+static Commands commands = {0};
+
+typedef struct
+{
+    size_t index;
+    char **items;
+    size_t count;
+    size_t capacity;
+    size_t factor;
+} CommandsHistory;
+static CommandsHistory commands_history = {0};
+
+// TODO: sistemare tutto questo sistema
+// - pensavo anche di fare in modo che se stai scrivendo un comando e fai previous ti salva quello che stavi scrivendo
+void commands_history_add(char *cmd)
+{
+    commands_history.index++;
+    da_push(&commands_history, strdup(cmd));
+}
+
+void commands_history_previous()
+{
+    if (!editor.in_cmd) return;
+    if (commands_history.index == 0) return;
+    commands_history.index--;
+    log_this("Go back one command: `%s`", commands_history.items[commands_history.index]);
+}
+
+void commands_history_next()
+{
+    if (!editor.in_cmd) return;
+    if (commands_history.index == commands_history.count-1) return;
+    commands_history.index++;
+    log_this("Go forward one command: `%s`", commands_history.items[commands_history.index]);
+}
 
 #define USER_CMDS_COUNT (commands.count - BUILTIN_CMDS_COUNT)
 
@@ -668,8 +711,10 @@ bool expect_n_arguments(const Command *cmd, size_t n)
 
 CommandType parse_cmdtype(char *type)
 {
-    static_assert(BUILTIN_CMDS_COUNT == 7, "Parse all commands in parse_cmd");
-    if      (streq(type, MOVE_CURSOR_UP))    return BUILTIN_MOVE_CURSOR_UP;
+    static_assert(BUILTIN_CMDS_COUNT == 9, "Parse all commands in parse_cmd");
+    if      (streq(type, SAVE))              return BUILTIN_SAVE;
+    else if (streq(type, QUIT))              return BUILTIN_QUIT;
+    else if (streq(type, MOVE_CURSOR_UP))    return BUILTIN_MOVE_CURSOR_UP;
     else if (streq(type, MOVE_CURSOR_DOWN))  return BUILTIN_MOVE_CURSOR_DOWN;
     else if (streq(type, MOVE_CURSOR_LEFT))  return BUILTIN_MOVE_CURSOR_LEFT;
     else if (streq(type, MOVE_CURSOR_RIGHT)) return BUILTIN_MOVE_CURSOR_RIGHT;
@@ -747,6 +792,9 @@ typedef struct
 } Location;
 
 //TODO:
+// - dovrei probabilmente non usare strtok e fare tutto a mano
+//   > funzioni come trim (left/right) sarebbero utili anche altrove tanto e poi ho String che e' molto utile
+//   > questo mi aiuterebbe a parsare anche le nuove cose che voglio implementare (argomenti numerati e nominali)
 // - track location
 // - si puo' fare che se c'e' un errore continua a parsare e lo segnala solo (ritorna un da di errori)
 char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
@@ -786,7 +834,9 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
             } else {
                 char *saveptr_args;
                 char *arg = strtok_r(args_str, ",", &saveptr_args);
-                while (arg != NULL) {
+                while (arg != NULL) { // TODO: qui dovrei riportare errori del tipo: "cmd.arg1,"
+                                      // - si presuppone che ci sia un altro argomento che in realta' non c'e'
+                                      // - forse non posso usare strtok
                     da_push(&args, strdup(arg));
                     arg = strtok_r(NULL, ",", &saveptr_args);
                 }
@@ -827,23 +877,48 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
                         case ARG_STRING:
                             // TODO: allora, devo farlo a mano e devo prima cercare negli argomenti se ce ne sono ancora (caso "ciao,come,stai"), altrimenti continuo con la line (caso "ciao come stai"), poi salvo la fine in saveptr_cmds e da li' si continua con gli altri comandi
                             if (*arg == '\"') {
-                                log_this("quoted string beginning with `%s`", arg);
                                 size_t arglen = strlen(arg);
                                 if (arglen == 1 || arg[arglen-1] != '\"') {
-                                    log_this("quoted string has multiple words", arg);
-                                    char *next_str_word;
-                                    while ((next_str_word = strtok_r(NULL, " \t", &saveptr_cmds)) != NULL ) {
-                                        log_this("Searching for \" in `%s`", next_str_word);
-                                        strcat(arg, next_str_word);
-                                        if (strchr(next_str_word, '\"') != NULL) break;
+                                    String str = {0};
+                                    da_default(&str);
+                                    s_push_cstr(&str, arg);
+                                    size_t j;
+                                    bool done = false;
+                                    for (j = i+1; j < args.count; j++) {
+                                        if (strchr(args.items[j], '\"')) {
+                                            char *popped_arg;
+                                            da_remove(&args, (int)j, popped_arg);
+                                            s_push(&str, ',');
+                                            s_push_cstr(&str, popped_arg);
+                                            done = true;
+                                            break;
+                                        }
                                     }
-                                    if (next_str_word == NULL) {
-                                        // TODO: report location
-                                        return strdup("unclosed dquote");
+                                    if (!done && j >= args.count) { // TODO: search after all the arguments char by char
+                                        char *rest_of_str = saveptr_cmds;
+                                        size_t len = strlen(rest_of_str);
+                                        char *end = rest_of_str+len-1;
+                                        while (isspace(*end)) end--;
+                                        *(end+1) = '\0';
+                                        size_t k = 0;
+                                        while (k < len && *rest_of_str != '\"') {
+                                            s_push(&str, *rest_of_str);
+                                            rest_of_str++;
+                                        }
+                                        if (k >= len) {
+                                            // TODO: track location
+                                            return strdup("unclosed quoted string");
+                                        } else s_push(&str, '\"');
+                                        saveptr_cmds = rest_of_str+1;
                                     }
-                                } else log_this("quoted string ends in the same word", arg);
+                                    s_push_null(&str);
+                                    arg = str.items;
+                                }
+                                arg[strlen(arg)-1] = '\0';
+                                arg++;
                             }
-                            // TODO: add support for '\\n' in string arg
+                            // TODO: add support for char '\n' in string arg
+                            // TODO: add support for char '"' in string arg
                             actual_arg.value = strdup(arg); // TODO: rember to free
                             break;
                         default:
@@ -858,6 +933,15 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
         da_push(cmds, cmd);
         cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
     }
+    return NULL;
+}
+
+char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
+{
+    (void)cmds;
+    (void)cmd_args;
+    (void)loc;
+    log_this("TODO: parse cmds from `%s`", cmds_str);
     return NULL;
 }
 
@@ -883,7 +967,7 @@ void load_config()
         }
 
         fprintf(config_file, "quit_times: %zu   // times you need to press CTRL-q before exiting without saving\n",
-                default_quit_times);
+                default_quit_times); // TODO: make the description a macro/const
         fprintf(config_file, "msg_lifetime: %zu // time in seconds of the duration of a message\n",
                 default_msg_lifetime);
 
@@ -909,7 +993,8 @@ void load_config()
 
     // commands initialization
     da_init(&commands, BUILTIN_CMDS_COUNT-1, DA_DEFAULT_FAC);
-    static_assert(BUILTIN_CMDS_COUNT == 7, "Add all builtin commands in commands");
+    static_assert(BUILTIN_CMDS_COUNT == 9, "Add all builtin commands in commands");
+    add_builtin_command(QUIT,              BUILTIN_QUIT,              (CommandArgs){0});
     add_builtin_command(MOVE_CURSOR_UP,    BUILTIN_MOVE_CURSOR_UP,    (CommandArgs){0});
     add_builtin_command(MOVE_CURSOR_DOWN,  BUILTIN_MOVE_CURSOR_DOWN,  (CommandArgs){0});
     add_builtin_command(MOVE_CURSOR_LEFT,  BUILTIN_MOVE_CURSOR_LEFT,  (CommandArgs){0});
@@ -923,7 +1008,13 @@ void load_config()
 
     cmd_arg = (CommandArg){.value = NULL, .type=ARG_STRING, .needed=true};
     da_push(&cmd_args, cmd_arg);
+    add_builtin_command(SAVE, BUILTIN_SAVE, cmd_args); // TODO: argomento per salvare il file con un nome
+    da_clear(&cmd_args);
+
+    cmd_arg = (CommandArg){.value = NULL, .type=ARG_STRING, .needed=true};
+    da_push(&cmd_args, cmd_arg);
     add_builtin_command(INSERT, BUILTIN_INSERT, cmd_args);
+    da_clear(&cmd_args);
 
     Location loc = {0};
     ssize_t res; 
@@ -1139,7 +1230,8 @@ void initialize()
     editor.cmd_pos = 0;
     editor.in_cmd = false;
     da_default(&editor.message);
-    editor.msg_time = (time_t)0;
+    editor.current_msg_time = (time_t)0;
+    da_init(&commands_history, 2, DA_DEFAULT_FAC);
     editor.N = N_DEFAULT;
 
     // window size
@@ -1418,6 +1510,7 @@ void insert_char(char c)
             } else {
                 cli_cmd.subcmds = subcmds;
                 cli_cmd.args = args;
+                commands_history_add(editor.cmd.items);
                 execute_cmd(&cli_cmd);
             }
             //free_commands(&cmds);
@@ -1483,14 +1576,14 @@ void builtin_insert(const Command *cmd)
 
 }
 
-void execute_cmd(const Command *cmd) // TODO:
-                                     // - storia dei comandi usati, si scorre con ALT_k e ALT_j
-                                     // - questa funzione dovrebbe solo prendere un comando ed eseguirlo, il parsing della linea di comando deve essere fatto prima e poi si passa il comando parsato qua
+void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorre con ALT_k e ALT_j
 {
-    static_assert(BUILTIN_CMDS_COUNT == 7, "Execute all commands in execute_cmd");
+    static_assert(BUILTIN_CMDS_COUNT == 9, "Execute all commands in execute_cmd");
     for (size_t i = 0; i < cmd->n; i++ ) {
         switch (cmd->type)
         {
+            case BUILTIN_SAVE             : save();                      break;
+            case BUILTIN_QUIT             : if (quit()) exit(0);         break;
             case BUILTIN_MOVE_CURSOR_UP   : builtin_move_cursor_up();    break;
             case BUILTIN_MOVE_CURSOR_DOWN : builtin_move_cursor_down();  break; 
             case BUILTIN_MOVE_CURSOR_LEFT : builtin_move_cursor_left();  break;
@@ -1611,7 +1704,7 @@ void delete_word()
     editor.dirty++;
 }
 
-void command()
+void begin_command()
 {
     s_clear(&editor.cmd);
     editor.cmd_pos = 0;
@@ -1658,6 +1751,9 @@ void process_pressed_key(void)
         case ALT_H: move_cursor_first_non_space(); break;
         case ALT_L: move_cursor_last_non_space();  break;
 
+        case CTRL_P: commands_history_previous(); break;
+        case CTRL_N: commands_history_next();     break;
+
         //case CTRL_K: N_TIMES scroll_up();                          break;
         //case CTRL_J: N_TIMES scroll_down();                        break;
         //case CTRL_H: set_message("TODO: CTRL-H"); break;
@@ -1673,7 +1769,7 @@ void process_pressed_key(void)
         //case ALT_H: move_cursor_begin_of_line(); break;
         //case ALT_L: move_cursor_end_of_line();   break; 
 
-        case ALT_COLON: command(); break;
+        case ALT_COLON: begin_command(); break;
         case ALT_BACKSPACE: N_TIMES delete_word(); break;
 
         case TAB:
