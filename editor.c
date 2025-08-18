@@ -674,28 +674,49 @@ typedef struct
 } CommandsHistory;
 static CommandsHistory commands_history = {0};
 
+// index == 1
+// [ciao, caro]
+// 1. :ciao\n
+// 2. :caro\n
+// 3. :C-P
+
 // TODO: sistemare tutto questo sistema
 // - pensavo anche di fare in modo che se stai scrivendo un comando e fai previous ti salva quello che stavi scrivendo
 void commands_history_add(char *cmd)
 {
-    commands_history.index++;
+    log_this("Adding command in history: `%s`", cmd);
     da_push(&commands_history, strdup(cmd));
+    commands_history.index = commands_history.count-1;
 }
 
+// TODO: non funziona ancora bene
 void commands_history_previous()
 {
     if (!editor.in_cmd) return;
+    if (da_is_empty(&commands_history)) return;
     if (commands_history.index == 0) return;
-    commands_history.index--;
-    log_this("Go back one command: `%s`", commands_history.items[commands_history.index]);
+    editor.cmd_pos = 0;
+    if (commands_history.index != commands_history.count-1) commands_history.index--;
+    char *cmd = commands_history.items[commands_history.index];
+    size_t len = strlen(cmd);
+    s_clear(&editor.cmd);
+    s_push_str(&editor.cmd, cmd, len);
+    editor.cmd_pos = len;
+    if (commands_history.index == commands_history.count-1) commands_history.index--;
 }
 
 void commands_history_next()
 {
     if (!editor.in_cmd) return;
-    if (commands_history.index == commands_history.count-1) return;
+    if (da_is_empty(&commands_history)) return;
+    if (commands_history.index >= commands_history.count-1) return;
+    editor.cmd_pos = 0;
     commands_history.index++;
-    log_this("Go forward one command: `%s`", commands_history.items[commands_history.index]);
+    char *cmd = commands_history.items[commands_history.index];
+    size_t len = strlen(cmd);
+    s_clear(&editor.cmd);
+    s_push_str(&editor.cmd, cmd, len);
+    editor.cmd_pos = len;
 }
 
 #define USER_CMDS_COUNT (commands.count - BUILTIN_CMDS_COUNT)
@@ -934,6 +955,19 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
         cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
     }
     return NULL;
+}
+
+void trim_left(char **str) { while (isspace(**str)) *str += 1; }
+void trim_right(char *str)
+{
+    char *end = str+strlen(str)-1;
+    while (isspace(*end)) end--;
+    *(end+1) = '\0';
+}
+void trim(char **str)
+{
+    trim_left(str);
+    trim_right(*str);
 }
 
 char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
@@ -1214,6 +1248,8 @@ void initialize()
     da_default(&screen_buf);
 
     // editor
+    editor = (Editor){0}; // TODO: basterebbe questo lol (tranne per valori che non devono essere nulli)
+
     editor.filename = NULL;
     editor.rows = (Rows){0};
     da_default(&editor.rows);
@@ -1495,7 +1531,12 @@ void insert_char(char c)
     if (editor.in_cmd) {
         if (c == '\n') {
             s_push_null(&editor.cmd);
+            char *cmd_str = editor.cmd.items;
+            commands_history_add(cmd_str);
             editor.in_cmd = false;
+            s_clear(&editor.cmd);
+            editor.cmd_pos = 0;
+
             Command cli_cmd = {
                 .name = "cli command",
                 .type = CLI,
@@ -1503,14 +1544,13 @@ void insert_char(char c)
             };
             Commands subcmds = {0};
             CommandArgs args = {0};
-            char *parse_error = parse_cmds(editor.cmd.items, &subcmds, &args, NULL);
+            char *parse_error = parse_cmds(cmd_str, &subcmds, &args, NULL);
             if (parse_error != NULL) {
                 set_message("ERROR: %s", parse_error);
                 free(parse_error);
             } else {
                 cli_cmd.subcmds = subcmds;
                 cli_cmd.args = args;
-                commands_history_add(editor.cmd.items);
                 execute_cmd(&cli_cmd);
             }
             //free_commands(&cmds);
@@ -1704,13 +1744,6 @@ void delete_word()
     editor.dirty++;
 }
 
-void begin_command()
-{
-    s_clear(&editor.cmd);
-    editor.cmd_pos = 0;
-    editor.in_cmd = true;
-}
-
 void process_pressed_key(void)
 {
     int key = read_key();
@@ -1769,7 +1802,7 @@ void process_pressed_key(void)
         //case ALT_H: move_cursor_begin_of_line(); break;
         //case ALT_L: move_cursor_end_of_line();   break; 
 
-        case ALT_COLON: begin_command(); break;
+        case ALT_COLON: editor.in_cmd = true; break;
         case ALT_BACKSPACE: N_TIMES delete_word(); break;
 
         case TAB:
@@ -1816,7 +1849,11 @@ void process_pressed_key(void)
         //    break;
 
         case ESC:
-            if (editor.in_cmd) editor.in_cmd = false;
+            if (editor.in_cmd) {
+                editor.in_cmd = false;
+                editor.cmd_pos = 0;
+                s_clear(&editor.cmd);
+            }
             break;
 
         default:
