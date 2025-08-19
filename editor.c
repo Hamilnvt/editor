@@ -2,10 +2,9 @@
 
 /* TODO:
     
+    - commands_history_cap (config?)
     - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
-    - coda dei messaggi da mostrare
-        >  shortcut per mostrare il messaggio successivo
     - numeri della linea e relativi/assoluti (config)
         > comando per spostarsi ad una riga precisa
     - comando che stampa l'elenco dei comandi (builtin + user defined)
@@ -27,8 +26,12 @@
     - funzioni separate per la modifica della command line (altrimenti non si capisce niente)
       > cambiare anche process_pressed_key in modo da prendere solo gli input che valgono anche per il comando (altrimenti dovrei controllare in ogni funzione se si e' in_cmd e poi fare return
     - gestire con max_int o come si chiama il limite di editor.N
-    - undo
-      > undo dei comandi
+    - undo: undo dei comandi o versioni diverse delle variabili globali? Probabilmente la prima
+    - comando `date` che inserisce la data e l'ora
+    - emacs snippet thing (non ricordo il nome del package)
+        > ifTAB => if (COND) {\n BODY \n}
+        > con TAB ulteriori vai avanti nei vari blocchi
+        > sintassi?
 
 */
 
@@ -45,6 +48,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <math.h>
 
 #define STRINGS_IMPLEMNTATION
 #include "../libs/strings.h"
@@ -77,7 +81,7 @@ typedef struct
     size_t screencols;
     size_t page;
 
-    String message;
+    Strings messages;
     time_t current_msg_time;
 
     String cmd;
@@ -128,12 +132,12 @@ const size_t default_msg_lifetime = 3;
 typedef enum
 {
     KEY_NULL  = 0,
-    TAB       = 9,
-    ENTER     = 13,
     CTRL_H    = 8,
+    TAB       = 9,
     CTRL_J    = 10,
     CTRL_K    = 11,
     CTRL_L    = 12,
+    ENTER     = 13,
     CTRL_N    = 14,
     CTRL_P    = 16,
     CTRL_Q    = 17,
@@ -160,6 +164,7 @@ typedef enum
     ALT_H,
     ALT_l,
     ALT_L,
+    ALT_M,
 
     ALT_BACKSPACE,
     ALT_COLON,
@@ -193,16 +198,24 @@ void log_this(char *format, ...)
     fclose(logfile);
 }
 
-void set_message(const char *fmt, ...)
+void enqueue_message(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
     char buf[1024] = {0};
     vsnprintf(buf, editor.screencols, fmt, ap);
-    s_clear(&editor.message);
-    s_push_cstr(&editor.message, buf);
-    editor.current_msg_time = time(NULL);
+    da_push(&editor.messages, strdup(buf)); // TODO: rember to free
     va_end(ap);
+}
+
+char *next_message()
+{
+    if (da_is_empty(&editor.messages)) return NULL;
+    char *popped_msg;
+    da_pop_front(&editor.messages, popped_msg);
+    free(popped_msg);
+    editor.current_msg_time = time(NULL);
+    return da_is_empty(&editor.messages) ? NULL : editor.messages.items[0];
 }
 
 struct termios term_old;
@@ -279,6 +292,7 @@ int read_key()
                     case 'H'      : return ALT_H;
                     case 'l'      : return ALT_l;
                     case 'L'      : return ALT_L;
+                    case 'M'      : return ALT_M;
                     case BACKSPACE: return ALT_BACKSPACE;
                     case ':'      : return ALT_COLON;
                     default       : return ESC;
@@ -293,7 +307,7 @@ int read_key()
             //        if (read(STDIN_FILENO, seq+2, 1) == 0) return ESC;
             //        log_this("2: %d", seq[2]);
             //        if (seq[2] == '~') {
-            //            //set_message("Pressed: crazy ESC ~ sequence");
+            //            //enqueue_message("Pressed: crazy ESC ~ sequence");
             //            log_this("Pressed: crazy ESC ~ sequence");
             //            return '\0';
             //            //switch (seq[1]) {
@@ -303,7 +317,7 @@ int read_key()
             //            //}
             //        }
             //    } else {
-            //        //set_message("Pressed: crazy ESC sequence");
+            //        //enqueue_message("Pressed: crazy ESC sequence");
             //        log_this("Pressed: crazy ESC sequence");
             //        return '\0';
             //        //switch (seq[1]) {
@@ -319,7 +333,7 @@ int read_key()
 
             ///* ESC O sequences. */
             //else if (seq[0] == 'O') {
-            //    //set_message("Pressed: crazy ESC O sequence");
+            //    //enqueue_message("Pressed: crazy ESC O sequence");
             //    log_this("Pressed: crazy ESC O sequence");
             //    return '\0';
             //    //switch(seq[1]) {
@@ -404,6 +418,7 @@ void refresh_screen(void)
     s_push_cstr(&screen_buf, ANSI_HIDE_CURSOR);
     s_push_cstr(&screen_buf, ANSI_GO_HOME_CURSOR);
 
+    size_t lines_magnitude = log(editor.rows.count);
     Row *row;
     for (size_t y = editor.rowoff; y < editor.rowoff+editor.screenrows; y++) {
         // TODO: si puo' fattorizzare la funzione che aggiunge gli spazi per keep_cursor
@@ -440,9 +455,13 @@ void refresh_screen(void)
             s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
             continue; 
         }
-        if (len > editor.screencols) len = editor.screencols; // TODO: viene troncata la riga
+        if (len > editor.screencols-lines_magnitude-1) len = editor.screencols-lines_magnitude-1; // TODO: viene troncata la riga
         int c;
-        for (size_t x = 0; x < len; x++) {
+        for (size_t x = 0; x < lines_magnitude; x++) {
+            s_push(&screen_buf, '#'); 
+        }
+        s_push(&screen_buf, ' '); 
+        for (size_t x = lines_magnitude+1; x < len; x++) {
             c = row->content.items[x];
             bool keep_cursor = is_current_line && editor.in_cmd && x == editor.cx-editor.coloff;
             if (keep_cursor) s_push_cstr(&screen_buf, ANSI_INVERSE);
@@ -505,10 +524,10 @@ void refresh_screen(void)
     if (editor.in_cmd) {
         s_push_cstr(&screen_buf, "Command: ");
         s_push_str(&screen_buf, editor.cmd.items, editor.cmd.count);
-    } else {
-        size_t msglen = editor.message.count;
-        if (msglen && time(NULL)-editor.current_msg_time < config.msg_lifetime)
-            s_push_str(&screen_buf, editor.message.items, msglen);
+    } else if (!da_is_empty(&editor.messages)) {
+        char *msg = editor.messages.items[0];
+        if (time(NULL)-editor.current_msg_time > config.msg_lifetime) msg = next_message();
+        if (msg) s_push_cstr(&screen_buf, msg);
     }
 
     /* Put cursor at its current position. Note that the horizontal position
@@ -604,7 +623,9 @@ void print_config()
 typedef enum
 {
     BUILTIN_SAVE,
-    BUILTIN_QUIT, // TODO: command to immediately quit, without saving
+    BUILTIN_QUIT,
+    BUILTIN_SAVE_AND_QUIT,
+    BUILTIN_FORCE_QUIT,
     BUILTIN_MOVE_CURSOR_UP,
     BUILTIN_MOVE_CURSOR_DOWN,
     BUILTIN_MOVE_CURSOR_LEFT,
@@ -618,10 +639,12 @@ typedef enum
     USER_DEFINED,
 } CommandType;
 
-static_assert(BUILTIN_CMDS_COUNT == 9, "Associate a name to all builtin commands");
+static_assert(BUILTIN_CMDS_COUNT == 11, "Associate a name to all builtin commands");
 /* NOTE: name of the builtin commands */
 #define SAVE              "s"
 #define QUIT              "q"
+#define SAVE_AND_QUIT     "sq"
+#define FORCE_QUIT        "fq"
 #define MOVE_CURSOR_UP    "u"
 #define MOVE_CURSOR_DOWN  "d"
 #define MOVE_CURSOR_LEFT  "l"
@@ -666,7 +689,7 @@ static Commands commands = {0};
 
 typedef struct
 {
-    size_t index;
+    int index;
     char **items;
     size_t count;
     size_t capacity;
@@ -680,37 +703,34 @@ static CommandsHistory commands_history = {0};
 // 2. :caro\n
 // 3. :C-P
 
-// TODO: sistemare tutto questo sistema
-// - pensavo anche di fare in modo che se stai scrivendo un comando e fai previous ti salva quello che stavi scrivendo
 void commands_history_add(char *cmd)
 {
     log_this("Adding command in history: `%s`", cmd);
     da_push(&commands_history, strdup(cmd));
-    commands_history.index = commands_history.count-1;
+    commands_history.index = -1;
 }
 
-// TODO: non funziona ancora bene
+// TODO: se stai scrivendo un comando e fai previous ti salva quello che stavi scrivendo
+// - magari solo come temporaneo, senza effettivamente aggiungerlo alla storia
 void commands_history_previous()
 {
     if (!editor.in_cmd) return;
     if (da_is_empty(&commands_history)) return;
     if (commands_history.index == 0) return;
-    editor.cmd_pos = 0;
-    if (commands_history.index != commands_history.count-1) commands_history.index--;
+    if (commands_history.index == -1) commands_history.index = commands_history.count-1;
+    else commands_history.index--;
     char *cmd = commands_history.items[commands_history.index];
     size_t len = strlen(cmd);
     s_clear(&editor.cmd);
     s_push_str(&editor.cmd, cmd, len);
     editor.cmd_pos = len;
-    if (commands_history.index == commands_history.count-1) commands_history.index--;
 }
 
 void commands_history_next()
 {
     if (!editor.in_cmd) return;
     if (da_is_empty(&commands_history)) return;
-    if (commands_history.index >= commands_history.count-1) return;
-    editor.cmd_pos = 0;
+    if (commands_history.index >= (int)commands_history.count-1) return;
     commands_history.index++;
     char *cmd = commands_history.items[commands_history.index];
     size_t len = strlen(cmd);
@@ -724,7 +744,7 @@ void commands_history_next()
 bool expect_n_arguments(const Command *cmd, size_t n)
 {
     if (cmd->args.count != n) {
-        set_message("ERROR: command `%s` expects %zu argument%s, but got %zu", cmd->name, n, n == 1 ? "" : "s", cmd->args.count);
+        enqueue_message("ERROR: command `%s` expects %zu argument%s, but got %zu", cmd->name, n, n == 1 ? "" : "s", cmd->args.count);
         // TODO: mostrare anche quali sono i tipi e i nomi degli argomenti
         return false;
     } else return true;
@@ -732,9 +752,11 @@ bool expect_n_arguments(const Command *cmd, size_t n)
 
 CommandType parse_cmdtype(char *type)
 {
-    static_assert(BUILTIN_CMDS_COUNT == 9, "Parse all commands in parse_cmd");
+    static_assert(BUILTIN_CMDS_COUNT == 11, "Parse all commands in parse_cmd");
     if      (streq(type, SAVE))              return BUILTIN_SAVE;
     else if (streq(type, QUIT))              return BUILTIN_QUIT;
+    else if (streq(type, SAVE_AND_QUIT))     return BUILTIN_SAVE_AND_QUIT;
+    else if (streq(type, FORCE_QUIT))        return BUILTIN_FORCE_QUIT;
     else if (streq(type, MOVE_CURSOR_UP))    return BUILTIN_MOVE_CURSOR_UP;
     else if (streq(type, MOVE_CURSOR_DOWN))  return BUILTIN_MOVE_CURSOR_DOWN;
     else if (streq(type, MOVE_CURSOR_LEFT))  return BUILTIN_MOVE_CURSOR_LEFT;
@@ -892,7 +914,7 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
                     switch (ref_arg->type)
                     {
                         case ARG_UINT:
-                            set_message("TODO: parse uint arg `%s`", arg);
+                            enqueue_message("TODO: parse uint arg `%s`", arg);
                             log_this("TODO: parse uint arg `%s`", arg);
                             break;
                         case ARG_STRING:
@@ -1027,8 +1049,11 @@ void load_config()
 
     // commands initialization
     da_init(&commands, BUILTIN_CMDS_COUNT-1, DA_DEFAULT_FAC);
-    static_assert(BUILTIN_CMDS_COUNT == 9, "Add all builtin commands in commands");
+    static_assert(BUILTIN_CMDS_COUNT == 11, "Add all builtin commands in commands");
+    add_builtin_command(SAVE,              BUILTIN_SAVE,              (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
     add_builtin_command(QUIT,              BUILTIN_QUIT,              (CommandArgs){0});
+    add_builtin_command(SAVE_AND_QUIT,     BUILTIN_SAVE_AND_QUIT,     (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
+    add_builtin_command(FORCE_QUIT,        BUILTIN_FORCE_QUIT,        (CommandArgs){0});
     add_builtin_command(MOVE_CURSOR_UP,    BUILTIN_MOVE_CURSOR_UP,    (CommandArgs){0});
     add_builtin_command(MOVE_CURSOR_DOWN,  BUILTIN_MOVE_CURSOR_DOWN,  (CommandArgs){0});
     add_builtin_command(MOVE_CURSOR_LEFT,  BUILTIN_MOVE_CURSOR_LEFT,  (CommandArgs){0});
@@ -1040,10 +1065,6 @@ void load_config()
     da_init(&cmd_args, 2, DA_DEFAULT_FAC);
     CommandArg cmd_arg;
 
-    cmd_arg = (CommandArg){.value = NULL, .type=ARG_STRING, .needed=true};
-    da_push(&cmd_args, cmd_arg);
-    add_builtin_command(SAVE, BUILTIN_SAVE, cmd_args); // TODO: argomento per salvare il file con un nome
-    da_clear(&cmd_args);
 
     cmd_arg = (CommandArg){.value = NULL, .type=ARG_STRING, .needed=true};
     da_push(&cmd_args, cmd_arg);
@@ -1265,10 +1286,12 @@ void initialize()
     da_default(&editor.cmd);
     editor.cmd_pos = 0;
     editor.in_cmd = false;
-    da_default(&editor.message);
-    editor.current_msg_time = (time_t)0;
-    da_init(&commands_history, 2, DA_DEFAULT_FAC);
+    da_init(&editor.messages, 2, DA_DEFAULT_FAC);
+    editor.current_msg_time = time(NULL);
     editor.N = N_DEFAULT;
+
+    da_init(&commands_history, 2, DA_DEFAULT_FAC);
+    commands_history.index = -1;
 
     // window size
     update_window_size();
@@ -1470,20 +1493,24 @@ bool save(void)
     close(fd);
     s_free(&save_buf);
     editor.dirty = 0;
-    set_message("%zu bytes written on disk", len);
+    enqueue_message("%zu bytes written on disk", len);
     return 0;
 
 writeerr:
     s_free(&save_buf);
     if (fd != -1) close(fd);
-    set_message("Can't save! I/O error: %s", strerror(errno));
+    enqueue_message("Can't save! I/O error: %s", strerror(errno));
     return 1;
 }
 
-bool quit(void)
+void quit() { exit(0); }
+
+bool can_quit(void)
 {
-    if (editor.dirty && editor.current_quit_times) {
-        set_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times, editor.current_quit_times == 1 ? "" : "s");
+    if (editor.dirty && editor.current_quit_times-1) {
+        // TODO: set higher priority messages that overwrite the current and then restore them after msg_lifetime secs
+        // - da pensare 
+        enqueue_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
         editor.current_quit_times--;
         return false;
     }
@@ -1546,7 +1573,7 @@ void insert_char(char c)
             CommandArgs args = {0};
             char *parse_error = parse_cmds(cmd_str, &subcmds, &args, NULL);
             if (parse_error != NULL) {
-                set_message("ERROR: %s", parse_error);
+                enqueue_message("ERROR: %s", parse_error);
                 free(parse_error);
             } else {
                 cli_cmd.subcmds = subcmds;
@@ -1618,12 +1645,14 @@ void builtin_insert(const Command *cmd)
 
 void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorre con ALT_k e ALT_j
 {
-    static_assert(BUILTIN_CMDS_COUNT == 9, "Execute all commands in execute_cmd");
+    static_assert(BUILTIN_CMDS_COUNT == 11, "Execute all commands in execute_cmd");
     for (size_t i = 0; i < cmd->n; i++ ) {
         switch (cmd->type)
         {
             case BUILTIN_SAVE             : save();                      break;
-            case BUILTIN_QUIT             : if (quit()) exit(0);         break;
+            case BUILTIN_QUIT             : if (can_quit()) quit();      break;
+            case BUILTIN_SAVE_AND_QUIT    : save(); quit();              break;
+            case BUILTIN_FORCE_QUIT       : quit();                      break;
             case BUILTIN_MOVE_CURSOR_UP   : builtin_move_cursor_up();    break;
             case BUILTIN_MOVE_CURSOR_DOWN : builtin_move_cursor_down();  break; 
             case BUILTIN_MOVE_CURSOR_LEFT : builtin_move_cursor_left();  break;
@@ -1631,7 +1660,7 @@ void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorr
             case BUILTIN_MOVE_LINE_UP     : builtin_move_line_up();      break;
             case BUILTIN_MOVE_LINE_DOWN   : builtin_move_line_down();    break;
             case BUILTIN_INSERT           : builtin_insert(cmd);         break;
-            case UNKNOWN: set_message("Unknown command `%s`", cmd->name); break;
+            case UNKNOWN: enqueue_message("Unknown command `%s`", cmd->name); break;
             case BUILTIN_CMDS_COUNT:
                 fprintf(stderr, CRNL "Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
                 exit(1);
@@ -1663,7 +1692,7 @@ void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorr
 
 void insert_newline_and_keep_pos()
 {
-    set_message("TODO: insert_newline_and_keep_pos");
+    enqueue_message("TODO: insert_newline_and_keep_pos");
 }
 
 void delete_char_at(Row *row, size_t at)
@@ -1784,18 +1813,20 @@ void process_pressed_key(void)
         case ALT_H: move_cursor_first_non_space(); break;
         case ALT_L: move_cursor_last_non_space();  break;
 
+        case ALT_M: next_message(); break;
+
         case CTRL_P: commands_history_previous(); break;
         case CTRL_N: commands_history_next();     break;
 
         //case CTRL_K: N_TIMES scroll_up();                          break;
         //case CTRL_J: N_TIMES scroll_down();                        break;
-        //case CTRL_H: set_message("TODO: CTRL-H"); break;
-        //case CTRL_L: set_message("TODO: CTRL-L"); break;
+        //case CTRL_H: enqueue_message("TODO: CTRL-H"); break;
+        //case CTRL_L: enqueue_message("TODO: CTRL-L"); break;
 
         //case ALT_k: N_TIMES move_page_up();                      break; 
         //case ALT_j: N_TIMES move_page_down();                    break;
-        //case ALT_h: set_message("TODO: ALT-h"); break;
-        //case ALT_l: set_message("TODO: ALT-l"); break;
+        //case ALT_h: enqueue_message("TODO: ALT-h"); break;
+        //case ALT_l: enqueue_message("TODO: ALT-l"); break;
         //            
         //case ALT_K: move_cursor_begin_of_file(); break;
         //case ALT_J: move_cursor_end_of_file();   break;
@@ -1809,7 +1840,7 @@ void process_pressed_key(void)
             if (editor.in_cmd) {
                 // TODO: autocomplete command
             } else {
-                set_message("TODO: insert TAB");
+                enqueue_message("TODO: insert TAB");
                 //insert_char('\t');
                 N_TIMES {
                     // TODO: tab to spaces + numero di spazi (config)
@@ -1823,7 +1854,7 @@ void process_pressed_key(void)
             break;
 
         case CTRL_Q:
-            if (quit()) exit(0);
+            if (can_quit()) { quit(); break; }
             else return;
 
         case CTRL_S:
