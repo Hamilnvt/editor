@@ -93,24 +93,14 @@ typedef struct
     int N; /* multiplicity for the command */
 } Editor;
 
-typedef struct
-{
-    size_t quit_times;
-    time_t msg_lifetime;
-    //char *prova;
-} Config;
-
-const size_t default_quit_times = 3;
-const size_t default_msg_lifetime = 3;
-//const char *default_prova = "prova";
-
 #define N_DEFAULT -1 
 #define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
 #define N_TIMES for (size_t i = 0; i < N_OR_DEFAULT(1); i++)
 
+#define LINES_MAGNITUDE ((size_t)log10(editor.rows.count)+1)
 #define CRNL "\r\n"
 #define CURRENT_Y_POS (editor.rowoff+editor.cy) 
-#define CURRENT_X_POS (editor.coloff+editor.cx) 
+#define CURRENT_X_POS (editor.coloff+editor.cx+LINES_MAGNITUDE) 
 #define ROW(i) (&editor.rows.items[i])
 #define CHAR(row, i) (ROW(row)->content.items[i])
 #define CURRENT_ROW ROW(CURRENT_Y_POS)
@@ -170,6 +160,75 @@ typedef enum
     ALT_COLON,
 } Key;
 
+/// BEGIN Config
+
+typedef enum
+{
+    FIELD_BOOL,
+    FIELD_UINT,
+    FIELD_STRING
+} FieldType;
+
+const char *valid_values_field_bool[] = {"true", "false", NULL};
+#define valid_values_field_uint NULL
+
+char *fieldtype_to_string(FieldType type)
+{
+    switch (type)
+    {
+        case FIELD_BOOL:   return "bool";
+        case FIELD_UINT:   return "uint";
+        case FIELD_STRING: return "string";
+        default:
+            fprintf(stderr, "Unreachable\n");
+            abort();
+    }
+}
+
+typedef struct
+{
+    const char *name;
+    FieldType type;
+    const void *ptr;
+    const char **valid_values;
+    const void *thefault;
+} ConfigField;
+
+da_decl(ConfigField, ConfigFields);
+
+ConfigField create_field(const char *name, FieldType type, void *ptr, const char **valid_values, const void *thefault)
+{
+    return (ConfigField){
+        .name=name,
+        .type=type,
+        .ptr=ptr,
+        .valid_values = valid_values,
+        .thefault=thefault
+    };
+}
+
+#define ADD_CONFIG_FIELD(name, type)         \
+    do {                                     \
+        ConfigField __field = create_field(#name, (type), (void *)&config.name, valid_values_ ##name, (void *)&default_ ## name);                                   \
+        da_push(&remaining_fields, __field); \
+    } while (0);
+
+const char **valid_values_quit_times = valid_values_field_uint;
+const char **valid_values_msg_lifetime = valid_values_field_uint; 
+typedef enum { LN_NO, LN_ABS, LN_REL } ConfigLineNumbersMode;
+const char *valid_values_line_numbers[] = {"no", "absolute", "relative", NULL};
+typedef struct
+{
+    size_t quit_times;
+    time_t msg_lifetime;
+    ConfigLineNumbersMode line_numbers;
+} Config;
+
+const size_t default_quit_times = 3;
+const size_t default_msg_lifetime = 3;
+const ConfigLineNumbersMode default_line_numbers = LN_REL;
+
+/// END Config 
 
 // Global variables ////////////////////////////// 
 int DISCARD_CHAR_RETURN = 0;
@@ -418,7 +477,6 @@ void refresh_screen(void)
     s_push_cstr(&screen_buf, ANSI_HIDE_CURSOR);
     s_push_cstr(&screen_buf, ANSI_GO_HOME_CURSOR);
 
-    size_t lines_magnitude = log(editor.rows.count);
     Row *row;
     for (size_t y = editor.rowoff; y < editor.rowoff+editor.screenrows; y++) {
         // TODO: si puo' fattorizzare la funzione che aggiunge gli spazi per keep_cursor
@@ -442,8 +500,28 @@ void refresh_screen(void)
 
         row = ROW(y);
 
+        // TODO: remove condition `config.line_numbers`, fix line number enum and then test it
+        if (config.line_numbers || config.line_numbers == LN_REL) {
+            size_t rel_num = is_current_line ? y : (y > CURRENT_Y_POS ? y-CURRENT_Y_POS : CURRENT_Y_POS-y);
+            size_t line_mag = log10(rel_num+1);
+            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
+                s_push(&screen_buf, ' '); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push_fstr(&screen_buf, "%zu", rel_num); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
+        } else if (config.line_numbers == LN_ABS) {
+            size_t line_mag = log10(y+1);
+            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
+                s_push(&screen_buf, ' '); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push_fstr(&screen_buf, "%zu", y+1); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
+        }
+        s_push(&screen_buf, ' '); 
+
         size_t len = row->content.count - editor.coloff;
-        if (len <= 0) {
+        if (len > editor.screencols-(LINES_MAGNITUDE)) len = editor.screencols-(LINES_MAGNITUDE); // TODO: viene troncata la riga
+        if (len == 0) {
             if (is_current_line && editor.in_cmd) {
                 for (size_t x = 0; x < editor.cx; x++) {
                     s_push(&screen_buf, ' ');
@@ -455,13 +533,9 @@ void refresh_screen(void)
             s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
             continue; 
         }
-        if (len > editor.screencols-lines_magnitude-1) len = editor.screencols-lines_magnitude-1; // TODO: viene troncata la riga
+
         int c;
-        for (size_t x = 0; x < lines_magnitude; x++) {
-            s_push(&screen_buf, '#'); 
-        }
-        s_push(&screen_buf, ' '); 
-        for (size_t x = lines_magnitude+1; x < len; x++) {
+        for (size_t x = 0; x < len; x++) {
             c = row->content.items[x];
             bool keep_cursor = is_current_line && editor.in_cmd && x == editor.cx-editor.coloff;
             if (keep_cursor) s_push_cstr(&screen_buf, ANSI_INVERSE);
@@ -499,7 +573,7 @@ void refresh_screen(void)
     size_t len = snprintf(status, sizeof(status), " %s %c (%zu, %zu) | %zu lines (%s) | page %zu/%zu", 
             editor.filename == NULL ? "unnamed" : editor.filename, 
             editor.dirty ? '+' : '-',
-            editor.cx+1, 
+            editor.cx+1-LINES_MAGNITUDE, 
             CURRENT_Y_POS+1, 
             editor.rows.count, 
             perc_buf,
@@ -558,7 +632,6 @@ void refresh_screen(void)
     s_clear(&screen_buf);
 }
 
-
 void handle_sigwinch(int signo)
 {
     (void)signo;
@@ -566,58 +639,6 @@ void handle_sigwinch(int signo)
     if (editor.cy > editor.screenrows) editor.cy = editor.screenrows - 1;
     if (editor.cx > editor.screencols) editor.cx = editor.screencols - 1;
     refresh_screen();
-}
-
-typedef enum
-{
-    FIELD_UINT,
-    //FIELD_STRING
-} FieldType;
-
-char *fieldtype_to_string(FieldType type)
-{
-    switch (type)
-    {
-        case FIELD_UINT: return "uint";
-        //case STRING: return "string";
-        default:
-            fprintf(stderr, "Unreachable\n");
-            abort();
-    }
-}
-
-typedef struct
-{
-    const char *name;
-    FieldType type;
-    void *ptr;
-    const void *thefault;
-} ConfigField;
-
-da_decl(ConfigField, ConfigFields);
-
-ConfigField create_field(const char *name, FieldType type, void *ptr, const void *thefault)
-{
-    return (ConfigField){
-        .name=name,
-        .type=type,
-        .ptr=ptr,
-        .thefault=thefault
-    };
-}
-
-#define ADD_CONFIG_FIELD(name, type)                                                            \
-    do {                                                                                        \
-        __field = create_field(#name, (type), (void *)&config.name, (void *)&default_ ## name); \
-        da_push(&remaining_fields, __field);                                                    \
-    } while (0);
-
-void print_config()
-{
-    printf("Config {\n");
-    printf("    quit_times: %zu\n", config.quit_times);
-    printf("    msg_lifetime: %zu\n", config.msg_lifetime);
-    printf("}\n");
 }
 
 typedef enum
@@ -1022,10 +1043,12 @@ void load_config()
             exit(1);
         }
 
-        fprintf(config_file, "quit_times: %zu   // times you need to press CTRL-q before exiting without saving\n",
+        fprintf(config_file, "quit_times: %zu\t// times you need to press CTRL-q before exiting without saving\n",
                 default_quit_times); // TODO: make the description a macro/const
-        fprintf(config_file, "msg_lifetime: %zu // time in seconds of the duration of a message\n",
+        fprintf(config_file, "msg_lifetime: %zu\t// time in seconds of the duration of a message\n",
                 default_msg_lifetime);
+        fprintf(config_file, "line_numbers: %s\t// display line numbers at_all, absolute or relative to the current line\n",
+                valid_values_line_numbers[default_line_numbers]);
 
         s_push_fstr(&config_log, "NOTE: default config file has been created\n\n");
         rewind(config_file);
@@ -1033,10 +1056,10 @@ void load_config()
 
     ConfigFields remaining_fields = {0};
     da_init(&remaining_fields, 2, DA_DEFAULT_FAC);
-    ConfigField __field;
 
     ADD_CONFIG_FIELD(quit_times,   FIELD_UINT);
     ADD_CONFIG_FIELD(msg_lifetime, FIELD_UINT);
+    ADD_CONFIG_FIELD(line_numbers, FIELD_STRING);
     //if (DEBUG) {
     //    for (size_t i = 0; i < remaining_fields.count; i++) {
     //        const ConfigField *field = &remaining_fields.items[i];
@@ -1164,6 +1187,18 @@ void load_config()
                     da_push(&inserted_fields, removed_field);
                     switch (removed_field.type)
                     {
+                        case FIELD_BOOL: {
+                            bool value = *(bool *)removed_field.thefault;
+                            if (streq(field_value, "true")) value = true;
+                            else if (streq(field_value, "false")) value = false;
+                            else {
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                                s_push_fstr(&config_log, "ERROR: field `%s` expects a boolean (`%s` or `%s`), but got `%s`\n", field_name, valid_values_field_bool[0], valid_values_field_bool[1], field_value);
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(bool *)removed_field.thefault ? "true" : "false");
+                            }
+                            *((bool *)removed_field.ptr) = value;
+                        } break;
                         case FIELD_UINT: {
                             size_t value = atoi(field_value);
                             if (value == 0) {
@@ -1177,17 +1212,38 @@ void load_config()
                                 //printf("CONFIG: field `%s` set to `%zu`\n", field_name, value);
                             }
                         } break;
-                        //case FIELD_STRING: {
-                        //    char *value = field_value;
-                        //    if (strlen(value) == 0) {
-                        //        fprintf(stderr, "ERROR: field `%s` expects a non empty string value\n", field_name);
-                        //        fprintf(stderr, "NOTE: defaulted to `%s`\n", *((char **)removed_field.thefault));
-                        //        *((char **)removed_field.ptr) = strdup(*((char **)removed_field.thefault));
-                        //    } else {
-                        //        *((char **)removed_field.ptr) = strdup(value);
-                        //        //printf("CONFIG: field `%s` set to `%s`\n", field_name, value);
-                        //    }
-                        //} break;
+                        case FIELD_STRING: {
+                            char *value = field_value;
+                            // TODO: merge this case and the one when the string is not in the set of the valid ones
+                            // - a questo punto devo distinguere quando una stringa puo' assumere qualsiasi valore o quando ne assume solo qualcuno
+                            if (strlen(value) == 0) {
+                                s_push_fstr(&config_log, "ERROR: field `%s` expects a non empty string value\n", field_name);
+                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", removed_field.valid_values[*(int *)removed_field.thefault]);
+                                removed_field.ptr = removed_field.thefault;
+                            } else {
+                                bool found = false;
+                                size_t i = 0;
+                                size_t arrlen;
+                                for (arrlen = 0; removed_field.valid_values[arrlen]; arrlen++)
+                                    ;
+                                while (!found && i < arrlen) {
+                                    if (streq(removed_field.valid_values[i], value)) found = true;
+                                    else i++;
+                                }
+                                if (found) *((char **)removed_field.ptr) = removed_field.valid_values[i];
+                                else {
+                                    s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
+                                    for (size_t j = 0; j < arrlen; j++) {
+                                        s_push_fstr(&config_log, "`%s`", removed_field.valid_values[j]);
+                                        if (arrlen > 2 && j < arrlen-2) s_push_cstr(&config_log, ", ");
+                                        else if (j == arrlen-2) s_push_cstr(&config_log, " or ");
+                                    }
+                                    s_push_fstr(&config_log, ", but got `%s`\n", value);
+                                    s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", (char *)removed_field.thefault); // TODO: non funziona questo
+                                    removed_field.ptr = removed_field.thefault;
+                                }
+                            }
+                        } break;
                         default:
                             s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                             fprintf(stderr, "Unreachable field type in load_config\n");
@@ -1230,14 +1286,18 @@ void load_config()
             s_push_fstr(&config_log, " -> %s (type: %s, default: ", field->name, fieldtype_to_string(field->type));
             switch (field->type)
             {
+                case FIELD_BOOL:
+                    s_push_fstr(&config_log, "`%s`)\n", *(bool *)field->thefault ? "true" : "false");
+                    *((bool *)field->ptr) = *((bool *)field->thefault);
+                    break;
                 case FIELD_UINT:
                     s_push_fstr(&config_log, "`%zu`)\n", *(size_t *)field->thefault);
                     *((size_t *)field->ptr) = *((size_t *)field->thefault);
                     break;
-                //case FIELD_STRING:
-                //    fprintf(stderr, "`%s`)\n", *(char **)field->thefault);
-                //    *((char **)field->ptr) = strdup(*((char **)field->thefault));
-                //    break;
+                case FIELD_STRING:
+                    fprintf(stderr, "`%s`)\n", (char *)field->thefault);
+                    *((char **)field->ptr) = strdup(field->thefault);
+                    break;
                 default:
                     fprintf(stderr, "Unreachable field type in load_config\n");
                     abort();
@@ -1329,6 +1389,7 @@ void open_file(char *filename)
         da_push(&editor.rows, row);
     }
     free(line);
+    editor.cx = LINES_MAGNITUDE+1;
 }
 
 // TODO: now it's trivial
@@ -1359,8 +1420,8 @@ void builtin_move_cursor_left()
         if (editor.cmd_pos > 0) editor.cmd_pos -= 1;
         else editor.cmd_pos = 0;
     } else {
-        if (editor.cx > 0) editor.cx -= 1;
-        else editor.cx = 0;
+        if (editor.cx > LINES_MAGNITUDE) editor.cx -= 1;
+        else editor.cx = LINES_MAGNITUDE;
     }
 }
 
@@ -1424,7 +1485,7 @@ void move_cursor_end_of_file()
     editor.cy = editor.screenrows-1;
 }
 
-void move_cursor_begin_of_line() { editor.cx = 0; }
+void move_cursor_begin_of_line() { editor.cx = LINES_MAGNITUDE; }
 
 void move_cursor_end_of_line()   { editor.cx = editor.screencols-1; } // TODO: coloff
 
@@ -1432,7 +1493,7 @@ void move_cursor_first_non_space()
 {
     Row *row = CURRENT_ROW;
     char *str = row->content.items;
-    editor.cx = 0;
+    editor.cx = LINES_MAGNITUDE;
     while (*str != '\0' && isspace(*str)) {
         editor.cx++;
         str++;
@@ -1448,7 +1509,7 @@ void move_cursor_last_non_space()
     int i = len - 1;
     while (i >= 0 && isspace(str[i]))
         i--;
-    editor.cx = (size_t)i == editor.screencols-1 ? i : i+1;
+    editor.cx = LINES_MAGNITUDE + i == editor.screencols-1 ? i : i+1;
 }
 
 void itoa(int n, char *buf)
@@ -1614,7 +1675,7 @@ void insert_char(char c)
         }
         if (editor.cy == editor.screenrows-1) editor.rowoff++;
         else editor.cy++;
-        editor.cx = 0;
+        editor.cx = LINES_MAGNITUDE;
         editor.coloff = 0;
     } else {
         if (y >= editor.rows.count) {
@@ -1726,7 +1787,7 @@ void delete_char()
         da_remove(&editor.rows, (int)y, _);
         if (editor.cy == 0) editor.rowoff--;
         else editor.cy--;
-        editor.cx = x;
+        editor.cx = x+LINES_MAGNITUDE;
         if (editor.cx >= editor.screencols) {
             int shift = (editor.screencols-editor.cx)+1;
             editor.cx -= shift;
@@ -1909,6 +1970,8 @@ int main(int argc, char **argv)
     initialize();
     open_file(filename);
     enable_raw_mode();
+
+    log_this("lines magnitude: %u", LINES_MAGNITUDE);
 
     while (true) {
         refresh_screen();

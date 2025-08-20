@@ -1,6 +1,10 @@
-mmmain(void)
-  {
-{            
-     printf("Hello, World!");
-     return 0;
-}}}       
+void foo()
+{
+    printf("foo\n");
+}
+
+main(void)    
+{
+    foo();
+    return 0;
+}   

@@ -2,4 +2,4 @@
 
 clear
 
-gcc -o editor editor.c -lm -Wall -Wextra -O2 -Wswitch-enum -Werror
+gcc -o editor editor.c -lm -Wall -Wextra -O2 -Wswitch-enum -Werror -Wno-discarded-qualifiers
