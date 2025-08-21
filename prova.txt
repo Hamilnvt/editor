@@ -1,4 +1,4 @@
-void foo()
+foo(void) 
 {
     printf("foo\n");
 }
@@ -6,5 +6,5 @@ void foo()
 main(void)    
 {
     foo();
-    return 0;
-}   
+
+

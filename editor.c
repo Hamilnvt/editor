@@ -32,6 +32,7 @@
         > ifTAB => if (COND) {\n BODY \n}
         > con TAB ulteriori vai avanti nei vari blocchi
         > sintassi?
+    - comando set.config_var
 
 */
 
@@ -92,6 +93,7 @@ typedef struct
 
     int N; /* multiplicity for the command */
 } Editor;
+static Editor editor = {0};
 
 #define N_DEFAULT -1 
 #define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
@@ -160,83 +162,6 @@ typedef enum
     ALT_COLON,
 } Key;
 
-/// BEGIN Config
-
-typedef enum
-{
-    FIELD_BOOL,
-    FIELD_UINT,
-    FIELD_STRING
-} FieldType;
-
-const char *valid_values_field_bool[] = {"true", "false", NULL};
-#define valid_values_field_uint NULL
-
-char *fieldtype_to_string(FieldType type)
-{
-    switch (type)
-    {
-        case FIELD_BOOL:   return "bool";
-        case FIELD_UINT:   return "uint";
-        case FIELD_STRING: return "string";
-        default:
-            fprintf(stderr, "Unreachable\n");
-            abort();
-    }
-}
-
-typedef struct
-{
-    const char *name;
-    FieldType type;
-    const void *ptr;
-    const char **valid_values;
-    const void *thefault;
-} ConfigField;
-
-da_decl(ConfigField, ConfigFields);
-
-ConfigField create_field(const char *name, FieldType type, void *ptr, const char **valid_values, const void *thefault)
-{
-    return (ConfigField){
-        .name=name,
-        .type=type,
-        .ptr=ptr,
-        .valid_values = valid_values,
-        .thefault=thefault
-    };
-}
-
-#define ADD_CONFIG_FIELD(name, type)         \
-    do {                                     \
-        ConfigField __field = create_field(#name, (type), (void *)&config.name, valid_values_ ##name, (void *)&default_ ## name);                                   \
-        da_push(&remaining_fields, __field); \
-    } while (0);
-
-const char **valid_values_quit_times = valid_values_field_uint;
-const char **valid_values_msg_lifetime = valid_values_field_uint; 
-typedef enum { LN_NO, LN_ABS, LN_REL } ConfigLineNumbersMode;
-const char *valid_values_line_numbers[] = {"no", "absolute", "relative", NULL};
-typedef struct
-{
-    size_t quit_times;
-    time_t msg_lifetime;
-    ConfigLineNumbersMode line_numbers;
-} Config;
-
-const size_t default_quit_times = 3;
-const size_t default_msg_lifetime = 3;
-const ConfigLineNumbersMode default_line_numbers = LN_REL;
-
-/// END Config 
-
-// Global variables ////////////////////////////// 
-int DISCARD_CHAR_RETURN = 0;
-Editor editor = {0};
-Config config = {0};
-String screen_buf = {0};
-//////////////////////////////////////////////////
-
 const char *logpath = "./log.txt";
 void log_this(char *format, ...)
 {
@@ -277,369 +202,7 @@ char *next_message()
     return da_is_empty(&editor.messages) ? NULL : editor.messages.items[0];
 }
 
-struct termios term_old;
-void reset_terminal(void)
-{
-    if (editor.rawmode) {
-        term_old.c_iflag |= ICRNL;
-        tcsetattr(STDIN_FILENO ,TCSAFLUSH, &term_old);
-        editor.rawmode = false;
-    }
-}
-
-void at_exit(void)
-{
-    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
-    printf(ANSI_CLEAR_SCREEN);
-    printf(ANSI_GO_HOME_CURSOR);
-    reset_terminal();
-}
-
-bool enable_raw_mode(void)
-{
-    if (editor.rawmode) return true;
-    if (!isatty(STDIN_FILENO)) return false;
-    atexit(at_exit);
-    if (tcgetattr(STDIN_FILENO, &term_old) == -1) return false;
-
-    struct termios term_raw = term_old;
-    term_raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    term_raw.c_oflag &= ~(OPOST);
-    term_raw.c_cflag |= (CS8);
-    term_raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    term_raw.c_cc[VMIN] = 0;
-    term_raw.c_cc[VTIME] = 0; // TODO: vedere come cambia la reattività per le ALT-sequences
-
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_raw) < 0) return false;
-    editor.rawmode = true;
-    return true;
-}
-
-int read_key()
-{
-    int nread;
-    char c;
-    while ((nread = read(STDIN_FILENO, &c, 1)) == 0);
-    if (nread == -1) exit(1); // TODO: report error (stdin probably failed)
-
-    while (true) { // TODO: perché while true?
-        switch (c) {
-        case ESC:    /* escape sequence */
-            int seq[3] = {0};
-
-            /* If this is just an ESC, we'll timeout here. */
-            if (read(STDIN_FILENO, seq, 1) == 0) return ESC;
-
-            if (read(STDIN_FILENO, seq+1, 1) == 0) {
-                switch (seq[0]) { /* ALT-X sequence */
-                    case '0'      : return ALT_0;
-                    case '1'      : return ALT_1;
-                    case '2'      : return ALT_2;
-                    case '3'      : return ALT_3;
-                    case '4'      : return ALT_4;
-                    case '5'      : return ALT_5;
-                    case '6'      : return ALT_6;
-                    case '7'      : return ALT_7;
-                    case '8'      : return ALT_8;
-                    case '9'      : return ALT_9;
-
-                    case 'k'      : return ALT_k;
-                    case 'K'      : return ALT_K;
-                    case 'j'      : return ALT_j;
-                    case 'J'      : return ALT_J;
-                    case 'h'      : return ALT_h;
-                    case 'H'      : return ALT_H;
-                    case 'l'      : return ALT_l;
-                    case 'L'      : return ALT_L;
-                    case 'M'      : return ALT_M;
-                    case BACKSPACE: return ALT_BACKSPACE;
-                    case ':'      : return ALT_COLON;
-                    default       : return ESC;
-                }
-            } else return ESC;
-
-            // TODO: probabilmente non userò queste sequenze, ma il codice lo tengo, non si sa mai
-            /* ESC [ sequences. */
-            //if (seq[0] == '[') {
-            //    if (isdigit(seq[1])) {
-            //        /* Extended escape, read additional byte. */
-            //        if (read(STDIN_FILENO, seq+2, 1) == 0) return ESC;
-            //        log_this("2: %d", seq[2]);
-            //        if (seq[2] == '~') {
-            //            //enqueue_message("Pressed: crazy ESC ~ sequence");
-            //            log_this("Pressed: crazy ESC ~ sequence");
-            //            return '\0';
-            //            //switch (seq[1]) {
-            //            //case '3': return DEL_KEY;
-            //            //case '5': return PAGE_UP;
-            //            //case '6': return PAGE_DOWN;
-            //            //}
-            //        }
-            //    } else {
-            //        //enqueue_message("Pressed: crazy ESC sequence");
-            //        log_this("Pressed: crazy ESC sequence");
-            //        return '\0';
-            //        //switch (seq[1]) {
-            //        //case 'A': return ARROW_UP;
-            //        //case 'B': return ARROW_DOWN;
-            //        //case 'C': return ARROW_RIGHT;
-            //        //case 'D': return ARROW_LEFT;
-            //        //case 'H': return HOME_KEY;
-            //        //case 'F': return END_KEY;
-            //        //}
-            //    }
-            //}
-
-            ///* ESC O sequences. */
-            //else if (seq[0] == 'O') {
-            //    //enqueue_message("Pressed: crazy ESC O sequence");
-            //    log_this("Pressed: crazy ESC O sequence");
-            //    return '\0';
-            //    //switch(seq[1]) {
-            //    //case 'H': return HOME_KEY;
-            //    //case 'F': return END_KEY;
-            //    //}
-            //}
-        default: return c;
-        }
-    }
-}
-
-/* Use the ESC [6n escape sequence to query the horizontal cursor position
- * and return it. On error false is returned, on success the position of the
- * cursor is stored at *rows and *cols and true is returned. */
-bool get_cursor_position(size_t *rows, size_t *cols)
-{
-    /* Report cursor location */
-    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return false;
-
-    char buf[32];
-    size_t i = 0;
-    /* Read the response: ESC [ rows ; cols R */
-    while (i < sizeof(buf)-1) {
-        if (read(STDIN_FILENO, buf+i, 1) != 1) break;
-        if (buf[i] == 'R') break;
-        i++;
-    }
-    buf[i] = '\0';
-
-    /* Parse it. */
-    if (buf[0] != ESC || buf[1] != '[') return false;
-    if (sscanf(buf+2, "%zu;%zu", rows, cols) != 2) return false;
-    return true;
-}
-
-/* Try to get the number of columns in the current terminal. If the ioctl()
- * call fails the function will try to query the terminal itself.
- * Returns true on success, false on error. */
-bool get_window_size(size_t *rows, size_t *cols)
-{
-    struct winsize ws;
-
-    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        /* ioctl() failed. Try to query the terminal itself. */
-        //int orig_row, orig_col, res;
-
-        ///* Get the initial position so we can restore it later. */
-        //res = get_cursor_position(&orig_row,&orig_col);
-        //if (res == -1) return false;
-        if (write(STDOUT_FILENO, ANSI_SAVE_CURSOR, 4) != 4) return false;
-
-        /* Go to right/bottom margin and get position. */
-        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return false;
-        if (!get_cursor_position(rows, cols)) return false;
-
-        /* Restore position. */
-        if (write(STDOUT_FILENO, ANSI_RESTORE_CURSOR, 4) != 4) return false;
-        //char seq[32];
-        //snprintf(seq,32,"\x1b[%d;%dH",orig_row,orig_col);
-        //if (write(ofd,seq,strlen(seq)) == -1) {
-        //    /* Can't recover... */
-        //}
-    } else {
-        *cols = ws.ws_col;
-        *rows = ws.ws_row;
-    }
-    return true;
-}
-void update_window_size(void)
-{
-    if (!get_window_size(&editor.screenrows, &editor.screencols)) {
-        perror("Unable to query the screen for size (columns / rows)");
-        exit(1);
-    }
-    editor.screenrows -= 2;
-}
-
-void refresh_screen(void)
-{
-    s_clear(&screen_buf);
-    s_push_cstr(&screen_buf, ANSI_HIDE_CURSOR);
-    s_push_cstr(&screen_buf, ANSI_GO_HOME_CURSOR);
-
-    Row *row;
-    for (size_t y = editor.rowoff; y < editor.rowoff+editor.screenrows; y++) {
-        // TODO: si puo' fattorizzare la funzione che aggiunge gli spazi per keep_cursor
-        bool is_current_line = y == editor.cy-editor.rowoff;
-
-        if (y >= editor.rows.count) {
-            if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_INVERSE);
-            s_push(&screen_buf, '~'); // TODO: poi lo voglio togliere, forse, ma ora lo uso per debuggare
-            if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_RESET);
-            if (is_current_line && editor.in_cmd && editor.cx > 0) {
-                for (size_t x = 1; x < editor.cx; x++) {
-                    s_push(&screen_buf, ' ');
-                }
-                s_push_cstr(&screen_buf, ANSI_INVERSE);
-                s_push(&screen_buf, ' ');
-                s_push_cstr(&screen_buf, ANSI_RESET);
-            }
-            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
-            continue;
-        }
-
-        row = ROW(y);
-
-        // TODO: remove condition `config.line_numbers`, fix line number enum and then test it
-        if (config.line_numbers || config.line_numbers == LN_REL) {
-            size_t rel_num = is_current_line ? y : (y > CURRENT_Y_POS ? y-CURRENT_Y_POS : CURRENT_Y_POS-y);
-            size_t line_mag = log10(rel_num+1);
-            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
-                s_push(&screen_buf, ' '); 
-            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
-            s_push_fstr(&screen_buf, "%zu", rel_num); 
-            if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
-        } else if (config.line_numbers == LN_ABS) {
-            size_t line_mag = log10(y+1);
-            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
-                s_push(&screen_buf, ' '); 
-            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
-            s_push_fstr(&screen_buf, "%zu", y+1); 
-            if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
-        }
-        s_push(&screen_buf, ' '); 
-
-        size_t len = row->content.count - editor.coloff;
-        if (len > editor.screencols-(LINES_MAGNITUDE)) len = editor.screencols-(LINES_MAGNITUDE); // TODO: viene troncata la riga
-        if (len == 0) {
-            if (is_current_line && editor.in_cmd) {
-                for (size_t x = 0; x < editor.cx; x++) {
-                    s_push(&screen_buf, ' ');
-                }
-                s_push_cstr(&screen_buf, ANSI_INVERSE);
-                s_push(&screen_buf, ' ');
-                s_push_cstr(&screen_buf, ANSI_RESET);
-            }
-            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
-            continue; 
-        }
-
-        int c;
-        for (size_t x = 0; x < len; x++) {
-            c = row->content.items[x];
-            bool keep_cursor = is_current_line && editor.in_cmd && x == editor.cx-editor.coloff;
-            if (keep_cursor) s_push_cstr(&screen_buf, ANSI_INVERSE);
-            if (!isprint(c)) {
-                s_push_cstr(&screen_buf, ANSI_INVERSE);
-                if (c <= 26) {
-                    s_push(&screen_buf, '^');
-                    s_push(&screen_buf, '@'+c);
-                } else s_push(&screen_buf, '?');
-                s_push_cstr(&screen_buf, ANSI_RESET);
-            } else s_push(&screen_buf, c);
-            if (keep_cursor) s_push_cstr(&screen_buf, ANSI_RESET);
-        }
-        if (is_current_line && editor.in_cmd && len <= editor.cx) {
-            for (size_t x = len; x < editor.cx; x++) {
-                s_push(&screen_buf, ' ');
-            }
-            s_push_cstr(&screen_buf, ANSI_INVERSE);
-            s_push(&screen_buf, ' ');
-            s_push_cstr(&screen_buf, ANSI_RESET);
-        }
-        s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
-    }
-
-    /* Create a two rows status. First row: */
-    s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR);
-    s_push_cstr(&screen_buf, ANSI_INVERSE); // displayed with inversed colours
-
-    char perc_buf[4];
-    if (CURRENT_Y_POS == 0) sprintf(perc_buf, "%s", "Top");
-    else if (CURRENT_Y_POS >= editor.rows.count-1) sprintf(perc_buf, "%s", "Bot");
-    else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
-
-    char status[80];
-    size_t len = snprintf(status, sizeof(status), " %s %c (%zu, %zu) | %zu lines (%s) | page %zu/%zu", 
-            editor.filename == NULL ? "unnamed" : editor.filename, 
-            editor.dirty ? '+' : '-',
-            editor.cx+1-LINES_MAGNITUDE, 
-            CURRENT_Y_POS+1, 
-            editor.rows.count, 
-            perc_buf,
-            editor.page+1,
-            N_PAGES
-    );
-    if (len > editor.screencols) len = editor.screencols;
-    s_push_str(&screen_buf, status, len);
-
-    char rstatus[80];
-    size_t rlen = editor.N == N_DEFAULT ? 0 : snprintf(rstatus, sizeof(rstatus), "%d", editor.N);
-    while (len < editor.screencols && editor.screencols - (len+1) != rlen) {
-        s_push(&screen_buf, ' ');
-        len++;
-    }
-    if (editor.N != N_DEFAULT) s_push_str(&screen_buf, rstatus, rlen);
-    s_push(&screen_buf, ' ');
-    s_push_cstr(&screen_buf, ANSI_RESET CRNL);
-
-    /* Second row depends on editor.message and the message remaining time. */
-    s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR);
-    if (editor.in_cmd) {
-        s_push_cstr(&screen_buf, "Command: ");
-        s_push_str(&screen_buf, editor.cmd.items, editor.cmd.count);
-    } else if (!da_is_empty(&editor.messages)) {
-        char *msg = editor.messages.items[0];
-        if (time(NULL)-editor.current_msg_time > config.msg_lifetime) msg = next_message();
-        if (msg) s_push_cstr(&screen_buf, msg);
-    }
-
-    /* Put cursor at its current position. Note that the horizontal position
-     * at which the cursor is displayed may be different compared to 'editor.cx'
-     * because of TABs. */
-    size_t cx = editor.cx+1;
-    size_t cy = editor.cy+1;
-    if (editor.in_cmd) {
-        cx = strlen("Command: ")+editor.cmd_pos+1;
-        cy = editor.screencols-1;
-    } else {
-        size_t y = CURRENT_Y_POS;
-        if (y < editor.rows.count) {
-            Row *row = ROW(y);
-            size_t rowlen = strlen(row->content.items);
-            for (size_t j = editor.coloff; j < (CURRENT_X_POS); j++) {
-                if (j < rowlen && row->content.items[j] == TAB) cx += 4;
-            }
-        }
-    }
-    char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%zu;%zuH", cy, cx);
-    s_push_str(&screen_buf, buf, strlen(buf));
-
-    s_push_cstr(&screen_buf, ANSI_SHOW_CURSOR);
-    s_push_null(&screen_buf);
-    write(STDOUT_FILENO, screen_buf.items, screen_buf.count);
-    s_clear(&screen_buf);
-}
-
-void handle_sigwinch(int signo)
-{
-    (void)signo;
-    update_window_size();
-    if (editor.cy > editor.screenrows) editor.cy = editor.screenrows - 1;
-    if (editor.cx > editor.screencols) editor.cx = editor.screencols - 1;
-    refresh_screen();
-}
+/// BEGIN Commands
 
 typedef enum
 {
@@ -654,13 +217,14 @@ typedef enum
     BUILTIN_MOVE_LINE_UP,
     BUILTIN_MOVE_LINE_DOWN,
     BUILTIN_INSERT,
+    BUILTIN_DATE,
     BUILTIN_CMDS_COUNT,
     UNKNOWN,
     CLI,
     USER_DEFINED,
 } CommandType;
 
-static_assert(BUILTIN_CMDS_COUNT == 11, "Associate a name to all builtin commands");
+static_assert(BUILTIN_CMDS_COUNT == 12, "Associate a name to all builtin commands");
 /* NOTE: name of the builtin commands */
 #define SAVE              "s"
 #define QUIT              "q"
@@ -673,6 +237,7 @@ static_assert(BUILTIN_CMDS_COUNT == 11, "Associate a name to all builtin command
 #define MOVE_LINE_UP      "lnu"
 #define MOVE_LINE_DOWN    "lnd"
 #define INSERT            "i"
+#define DATE              "date"
 
 typedef enum
 {
@@ -705,8 +270,7 @@ typedef struct Command // TODO: forse cosi'
 } Command;
 typedef struct Commands Commands;
 
-// NOTE: all commands are stored in here
-static Commands commands = {0};
+static Commands commands = {0}; // NOTE: all commands are stored in here
 
 typedef struct
 {
@@ -773,7 +337,7 @@ bool expect_n_arguments(const Command *cmd, size_t n)
 
 CommandType parse_cmdtype(char *type)
 {
-    static_assert(BUILTIN_CMDS_COUNT == 11, "Parse all commands in parse_cmd");
+    static_assert(BUILTIN_CMDS_COUNT == 12, "Parse all commands in parse_cmd");
     if      (streq(type, SAVE))              return BUILTIN_SAVE;
     else if (streq(type, QUIT))              return BUILTIN_QUIT;
     else if (streq(type, SAVE_AND_QUIT))     return BUILTIN_SAVE_AND_QUIT;
@@ -785,6 +349,7 @@ CommandType parse_cmdtype(char *type)
     else if (streq(type, MOVE_LINE_UP))      return BUILTIN_MOVE_LINE_UP;
     else if (streq(type, MOVE_LINE_DOWN))    return BUILTIN_MOVE_LINE_DOWN;
     else if (streq(type, INSERT))            return BUILTIN_INSERT;
+    else if (streq(type, DATE))              return BUILTIN_DATE;
     else {
         for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
             if (streq(type, commands.items[i].name))
@@ -1021,8 +586,73 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
     log_this("TODO: parse cmds from `%s`", cmds_str);
     return NULL;
 }
+/// END Commands
 
-#define CONFIG_PATH ".config/editor/config"
+/// BEGIN Config
+
+typedef enum
+{
+    FIELD_BOOL,
+    FIELD_UINT,
+    FIELD_STRING,
+    FIELD_LIMITED_STRING,
+    //FIELD_LIMITED_UINT,
+    //FIELD_RANGE_UINT,
+} FieldType;
+
+char *fieldtype_to_string(FieldType type)
+{
+    switch (type)
+    {
+        case FIELD_BOOL:           return "bool";
+        case FIELD_UINT:           return "uint";
+        case FIELD_STRING:         return "string";
+        case FIELD_LIMITED_STRING: return "limited string";
+        default:
+            fprintf(stderr, "Unreachable\n");
+            abort();
+    }
+}
+
+typedef struct
+{
+    const char *name;
+    FieldType type;
+    const void *ptr;
+    const char **valid_values;
+    const void *thefault;
+} ConfigField;
+
+da_decl(ConfigField, ConfigFields);
+
+ConfigField create_field(const char *name, FieldType type, void *ptr, const char **valid_values, const void *thefault)
+{
+    return (ConfigField){
+        .name=name,
+        .type=type,
+        .ptr=ptr,
+        .valid_values = valid_values,
+        .thefault=thefault
+    };
+}
+
+#define ADD_CONFIG_FIELD(name, type, valid_values)                                \
+    do {                                                                          \
+        ConfigField __field = create_field(#name, (type),                         \
+                (void *)&config.name, (valid_values), (void *)&default_ ## name); \
+        da_push(&remaining_fields, __field);                                      \
+    } while (0);
+
+typedef enum { LN_NO, LN_ABS, LN_REL } ConfigLineNumbers;
+
+typedef struct
+{
+    size_t quit_times;
+    time_t msg_lifetime;
+    ConfigLineNumbers line_numbers;
+} Config;
+Config config = {0};
+
 void load_config()
 {
     char *home = getenv("HOME");
@@ -1030,9 +660,18 @@ void load_config()
         fprintf(stderr, "Env variable HOME not set\n");
         exit(1);
     }
+
+    const size_t default_quit_times = 3;
+    const size_t default_msg_lifetime = 3;
+    const char *default_line_numbers = "relative";
+
+    const char *valid_values_field_bool[] = {"true", "false", NULL};
+    const char *valid_values_line_numbers[] = {"no", "absolute", "relative", NULL};
+
     String config_log = s_new_empty();
-    char full_config_path[256];
-    sprintf(full_config_path, "%s/%s", home, CONFIG_PATH);
+    const char *config_path = ".config/editor/config";
+    char full_config_path[256] = {0};
+    sprintf(full_config_path, "%s/%s", home, config_path);
     FILE *config_file = fopen(full_config_path, "r");
     if (config_file == NULL) {
         s_push_fstr(&config_log, "WARNING: config file not found at %s\n", full_config_path);
@@ -1048,7 +687,7 @@ void load_config()
         fprintf(config_file, "msg_lifetime: %zu\t// time in seconds of the duration of a message\n",
                 default_msg_lifetime);
         fprintf(config_file, "line_numbers: %s\t// display line numbers at_all, absolute or relative to the current line\n",
-                valid_values_line_numbers[default_line_numbers]);
+                default_line_numbers);
 
         s_push_fstr(&config_log, "NOTE: default config file has been created\n\n");
         rewind(config_file);
@@ -1057,9 +696,9 @@ void load_config()
     ConfigFields remaining_fields = {0};
     da_init(&remaining_fields, 2, DA_DEFAULT_FAC);
 
-    ADD_CONFIG_FIELD(quit_times,   FIELD_UINT);
-    ADD_CONFIG_FIELD(msg_lifetime, FIELD_UINT);
-    ADD_CONFIG_FIELD(line_numbers, FIELD_STRING);
+    ADD_CONFIG_FIELD(quit_times,   FIELD_UINT, NULL);
+    ADD_CONFIG_FIELD(msg_lifetime, FIELD_UINT, NULL);
+    ADD_CONFIG_FIELD(line_numbers, FIELD_LIMITED_STRING, valid_values_line_numbers);
     //if (DEBUG) {
     //    for (size_t i = 0; i < remaining_fields.count; i++) {
     //        const ConfigField *field = &remaining_fields.items[i];
@@ -1072,7 +711,7 @@ void load_config()
 
     // commands initialization
     da_init(&commands, BUILTIN_CMDS_COUNT-1, DA_DEFAULT_FAC);
-    static_assert(BUILTIN_CMDS_COUNT == 11, "Add all builtin commands in commands");
+    static_assert(BUILTIN_CMDS_COUNT == 12, "Add all builtin commands in commands");
     add_builtin_command(SAVE,              BUILTIN_SAVE,              (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
     add_builtin_command(QUIT,              BUILTIN_QUIT,              (CommandArgs){0});
     add_builtin_command(SAVE_AND_QUIT,     BUILTIN_SAVE_AND_QUIT,     (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
@@ -1093,6 +732,8 @@ void load_config()
     da_push(&cmd_args, cmd_arg);
     add_builtin_command(INSERT, BUILTIN_INSERT, cmd_args);
     da_clear(&cmd_args);
+
+    add_builtin_command(DATE, BUILTIN_DATE, (CommandArgs){0});
 
     Location loc = {0};
     ssize_t res; 
@@ -1199,6 +840,7 @@ void load_config()
                             }
                             *((bool *)removed_field.ptr) = value;
                         } break;
+
                         case FIELD_UINT: {
                             size_t value = atoi(field_value);
                             if (value == 0) {
@@ -1212,36 +854,62 @@ void load_config()
                                 //printf("CONFIG: field `%s` set to `%zu`\n", field_name, value);
                             }
                         } break;
+
                         case FIELD_STRING: {
                             char *value = field_value;
-                            // TODO: merge this case and the one when the string is not in the set of the valid ones
-                            // - a questo punto devo distinguere quando una stringa puo' assumere qualsiasi valore o quando ne assume solo qualcuno
                             if (strlen(value) == 0) {
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects a non empty string value\n", field_name);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", removed_field.valid_values[*(int *)removed_field.thefault]);
-                                removed_field.ptr = removed_field.thefault;
-                            } else {
-                                bool found = false;
-                                size_t i = 0;
-                                size_t arrlen;
-                                for (arrlen = 0; removed_field.valid_values[arrlen]; arrlen++)
-                                    ;
-                                while (!found && i < arrlen) {
-                                    if (streq(removed_field.valid_values[i], value)) found = true;
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                                s_push_fstr(&config_log, "ERROR: field `%s` expects a non empty string\n", field_name);
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
+                                removed_field.ptr = strdup(*(char **)removed_field.thefault);
+                            } else removed_field.ptr = strdup(*(char **)value);
+                        } break;
+
+                        case FIELD_LIMITED_STRING: {
+                            size_t arrlen = 0;
+                            for (; removed_field.valid_values[arrlen]; arrlen++)
+                                ;
+                            char *value = field_value;
+                            bool is_str_empty = strlen(value) == 0;
+                            bool is_valid = false;
+                            size_t i = 0;
+                            if (!is_str_empty) {
+                                while (!is_valid && i < arrlen) {
+                                    if (streq(removed_field.valid_values[i], value)) is_valid = true;
                                     else i++;
                                 }
-                                if (found) *((char **)removed_field.ptr) = removed_field.valid_values[i];
-                                else {
-                                    s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
-                                    for (size_t j = 0; j < arrlen; j++) {
-                                        s_push_fstr(&config_log, "`%s`", removed_field.valid_values[j]);
-                                        if (arrlen > 2 && j < arrlen-2) s_push_cstr(&config_log, ", ");
-                                        else if (j == arrlen-2) s_push_cstr(&config_log, " or ");
-                                    }
-                                    s_push_fstr(&config_log, ", but got `%s`\n", value);
-                                    s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", (char *)removed_field.thefault); // TODO: non funziona questo
-                                    removed_field.ptr = removed_field.thefault;
+                            }
+                            if (!is_valid || is_str_empty) {
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                                s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
+                                for (size_t j = 0; j < arrlen; j++) {
+                                    s_push_fstr(&config_log, "`%s`", removed_field.valid_values[j]);
+                                    if (arrlen > 2 && j < arrlen-2) s_push_cstr(&config_log, ", ");
+                                    else if (j == arrlen-2) s_push_cstr(&config_log, " or ");
                                 }
+                                s_push_fstr(&config_log, ", but got ");
+                                if (is_str_empty) s_push_fstr(&config_log, "an empty string ");
+                                else s_push_fstr(&config_log, "`%s` ", value);
+                                s_push_fstr(&config_log, "instead.\n");
+                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
+
+                                value = *(char **)removed_field.thefault;
+                            }
+                            if (streq(field_name, "line_numbers")) {
+                                ConfigLineNumbers result = LN_REL;
+                                if (streq(value, default_line_numbers)) result = LN_REL;
+                                else if (streq(value, "absolute")) result = LN_ABS;
+                                else if (streq(value, "no")) result = LN_NO;
+                                //else { // TODO: mi sembra un po' too much
+                                //    fprintf(stderr, "Unreachable field value `%s` for `%s` in load_config\n", value, field_name); 
+                                //    abort();
+                                //}
+                                *((ConfigLineNumbers *)removed_field.ptr) = result;
+                            } else { // NOTE: this is useful in case I forget to implement one
+                                fprintf(stderr, "Unreachable field name `%s` in load_config\n", field_name); 
+                                abort();
                             }
                         } break;
                         default:
@@ -1298,6 +966,11 @@ void load_config()
                     fprintf(stderr, "`%s`)\n", (char *)field->thefault);
                     *((char **)field->ptr) = strdup(field->thefault);
                     break;
+                case FIELD_LIMITED_STRING:
+                    fprintf(stderr, "`%s`)\n", (char *)field->thefault);
+                    *((char **)field->ptr) = strdup(field->thefault);
+                    // TODO: magari elencare anche qua i possibili valori
+                    break;
                 default:
                     fprintf(stderr, "Unreachable field type in load_config\n");
                     abort();
@@ -1320,6 +993,375 @@ void load_config()
             ;
         printf(ANSI_SHOW_CURSOR"\n");
     }
+}
+
+/// END Config 
+
+int DISCARD_CHAR_RETURN = 0;
+
+struct termios term_old;
+void reset_terminal(void)
+{
+    if (editor.rawmode) {
+        term_old.c_iflag |= ICRNL;
+        tcsetattr(STDIN_FILENO ,TCSAFLUSH, &term_old);
+        editor.rawmode = false;
+    }
+}
+
+void at_exit(void)
+{
+    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+    printf(ANSI_CLEAR_SCREEN);
+    printf(ANSI_GO_HOME_CURSOR);
+    reset_terminal();
+}
+
+bool enable_raw_mode(void)
+{
+    if (editor.rawmode) return true;
+    if (!isatty(STDIN_FILENO)) return false;
+    atexit(at_exit);
+    if (tcgetattr(STDIN_FILENO, &term_old) == -1) return false;
+
+    struct termios term_raw = term_old;
+    term_raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    term_raw.c_oflag &= ~(OPOST);
+    term_raw.c_cflag |= (CS8);
+    term_raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    term_raw.c_cc[VMIN] = 0;
+    term_raw.c_cc[VTIME] = 0; // TODO: vedere come cambia la reattività per le ALT-sequences
+
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_raw) < 0) return false;
+    editor.rawmode = true;
+    return true;
+}
+
+int read_key()
+{
+    int nread;
+    char c;
+    while ((nread = read(STDIN_FILENO, &c, 1)) == 0);
+    if (nread == -1) exit(1); // TODO: report error (stdin probably failed)
+
+    while (true) { // TODO: perché while true?
+        switch (c) {
+        case ESC:    /* escape sequence */
+            int seq[3] = {0};
+
+            /* If this is just an ESC, we'll timeout here. */
+            if (read(STDIN_FILENO, seq, 1) == 0) return ESC;
+
+            if (read(STDIN_FILENO, seq+1, 1) == 0) {
+                switch (seq[0]) { /* ALT-X sequence */
+                    case '0'      : return ALT_0;
+                    case '1'      : return ALT_1;
+                    case '2'      : return ALT_2;
+                    case '3'      : return ALT_3;
+                    case '4'      : return ALT_4;
+                    case '5'      : return ALT_5;
+                    case '6'      : return ALT_6;
+                    case '7'      : return ALT_7;
+                    case '8'      : return ALT_8;
+                    case '9'      : return ALT_9;
+
+                    case 'k'      : return ALT_k;
+                    case 'K'      : return ALT_K;
+                    case 'j'      : return ALT_j;
+                    case 'J'      : return ALT_J;
+                    case 'h'      : return ALT_h;
+                    case 'H'      : return ALT_H;
+                    case 'l'      : return ALT_l;
+                    case 'L'      : return ALT_L;
+                    case 'M'      : return ALT_M;
+                    case BACKSPACE: return ALT_BACKSPACE;
+                    case ':'      : return ALT_COLON;
+                    default       : return ESC;
+                }
+            } else return ESC;
+
+            // TODO: probabilmente non userò queste sequenze, ma il codice lo tengo, non si sa mai
+            /* ESC [ sequences. */
+            //if (seq[0] == '[') {
+            //    if (isdigit(seq[1])) {
+            //        /* Extended escape, read additional byte. */
+            //        if (read(STDIN_FILENO, seq+2, 1) == 0) return ESC;
+            //        log_this("2: %d", seq[2]);
+            //        if (seq[2] == '~') {
+            //            //enqueue_message("Pressed: crazy ESC ~ sequence");
+            //            log_this("Pressed: crazy ESC ~ sequence");
+            //            return '\0';
+            //            //switch (seq[1]) {
+            //            //case '3': return DEL_KEY;
+            //            //case '5': return PAGE_UP;
+            //            //case '6': return PAGE_DOWN;
+            //            //}
+            //        }
+            //    } else {
+            //        //enqueue_message("Pressed: crazy ESC sequence");
+            //        log_this("Pressed: crazy ESC sequence");
+            //        return '\0';
+            //        //switch (seq[1]) {
+            //        //case 'A': return ARROW_UP;
+            //        //case 'B': return ARROW_DOWN;
+            //        //case 'C': return ARROW_RIGHT;
+            //        //case 'D': return ARROW_LEFT;
+            //        //case 'H': return HOME_KEY;
+            //        //case 'F': return END_KEY;
+            //        //}
+            //    }
+            //}
+
+            ///* ESC O sequences. */
+            //else if (seq[0] == 'O') {
+            //    //enqueue_message("Pressed: crazy ESC O sequence");
+            //    log_this("Pressed: crazy ESC O sequence");
+            //    return '\0';
+            //    //switch(seq[1]) {
+            //    //case 'H': return HOME_KEY;
+            //    //case 'F': return END_KEY;
+            //    //}
+            //}
+        default: return c;
+        }
+    }
+}
+
+/* Use the ESC [6n escape sequence to query the horizontal cursor position
+ * and return it. On error false is returned, on success the position of the
+ * cursor is stored at *rows and *cols and true is returned. */
+bool get_cursor_position(size_t *rows, size_t *cols)
+{
+    /* Report cursor location */
+    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return false;
+
+    char buf[32];
+    size_t i = 0;
+    /* Read the response: ESC [ rows ; cols R */
+    while (i < sizeof(buf)-1) {
+        if (read(STDIN_FILENO, buf+i, 1) != 1) break;
+        if (buf[i] == 'R') break;
+        i++;
+    }
+    buf[i] = '\0';
+
+    /* Parse it. */
+    if (buf[0] != ESC || buf[1] != '[') return false;
+    if (sscanf(buf+2, "%zu;%zu", rows, cols) != 2) return false;
+    return true;
+}
+
+/* Try to get the number of columns in the current terminal. If the ioctl()
+ * call fails the function will try to query the terminal itself.
+ * Returns true on success, false on error. */
+bool get_window_size(size_t *rows, size_t *cols)
+{
+    struct winsize ws;
+
+    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+        /* ioctl() failed. Try to query the terminal itself. */
+        //int orig_row, orig_col, res;
+
+        ///* Get the initial position so we can restore it later. */
+        //res = get_cursor_position(&orig_row,&orig_col);
+        //if (res == -1) return false;
+        if (write(STDOUT_FILENO, ANSI_SAVE_CURSOR, 4) != 4) return false;
+
+        /* Go to right/bottom margin and get position. */
+        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return false;
+        if (!get_cursor_position(rows, cols)) return false;
+
+        /* Restore position. */
+        if (write(STDOUT_FILENO, ANSI_RESTORE_CURSOR, 4) != 4) return false;
+        //char seq[32];
+        //snprintf(seq,32,"\x1b[%d;%dH",orig_row,orig_col);
+        //if (write(ofd,seq,strlen(seq)) == -1) {
+        //    /* Can't recover... */
+        //}
+    } else {
+        *cols = ws.ws_col;
+        *rows = ws.ws_row;
+    }
+    return true;
+}
+void update_window_size(void)
+{
+    if (!get_window_size(&editor.screenrows, &editor.screencols)) {
+        perror("Unable to query the screen for size (columns / rows)");
+        exit(1);
+    }
+    editor.screenrows -= 2;
+}
+
+String screen_buf = {0};
+void refresh_screen(void)
+{
+    s_clear(&screen_buf);
+    s_push_cstr(&screen_buf, ANSI_HIDE_CURSOR);
+    s_push_cstr(&screen_buf, ANSI_GO_HOME_CURSOR);
+
+    Row *row;
+    for (size_t y = editor.rowoff; y < editor.rowoff+editor.screenrows; y++) {
+        // TODO: si puo' fattorizzare la funzione che aggiunge gli spazi per keep_cursor
+        bool is_current_line = y == editor.cy-editor.rowoff;
+
+        if (y >= editor.rows.count) {
+            if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push(&screen_buf, '~'); // TODO: poi lo voglio togliere, forse, ma ora lo uso per debuggare
+            if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_RESET);
+            if (is_current_line && editor.in_cmd && editor.cx > 0) {
+                for (size_t x = 1; x < editor.cx; x++) {
+                    s_push(&screen_buf, ' ');
+                }
+                s_push_cstr(&screen_buf, ANSI_INVERSE);
+                s_push(&screen_buf, ' ');
+                s_push_cstr(&screen_buf, ANSI_RESET);
+            }
+            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
+            continue;
+        }
+
+        row = ROW(y);
+
+        // TODO: test it
+        if (config.line_numbers == LN_REL) {
+            size_t rel_num = is_current_line ? y : (y > CURRENT_Y_POS ? y-CURRENT_Y_POS : CURRENT_Y_POS-y);
+            size_t line_mag = log10(rel_num+1);
+            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
+                s_push(&screen_buf, ' '); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push_fstr(&screen_buf, "%zu", rel_num); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
+        } else if (config.line_numbers == LN_ABS) {
+            size_t line_mag = log10(y+1);
+            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
+                s_push(&screen_buf, ' '); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push_fstr(&screen_buf, "%zu", y+1); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
+        }
+        s_push(&screen_buf, ' '); 
+
+        size_t len = row->content.count - editor.coloff;
+        if (len > editor.screencols-(LINES_MAGNITUDE)) len = editor.screencols-(LINES_MAGNITUDE); // TODO: viene troncata la riga
+        if (len == 0) {
+            if (is_current_line && editor.in_cmd) {
+                for (size_t x = 0; x < editor.cx; x++) {
+                    s_push(&screen_buf, ' ');
+                }
+                s_push_cstr(&screen_buf, ANSI_INVERSE);
+                s_push(&screen_buf, ' ');
+                s_push_cstr(&screen_buf, ANSI_RESET);
+            }
+            s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
+            continue; 
+        }
+
+        int c;
+        for (size_t x = 0; x < len; x++) {
+            c = row->content.items[x];
+            bool keep_cursor = is_current_line && editor.in_cmd && x == editor.cx-editor.coloff;
+            if (keep_cursor) s_push_cstr(&screen_buf, ANSI_INVERSE);
+            if (!isprint(c)) {
+                s_push_cstr(&screen_buf, ANSI_INVERSE);
+                if (c <= 26) {
+                    s_push(&screen_buf, '^');
+                    s_push(&screen_buf, '@'+c);
+                } else s_push(&screen_buf, '?');
+                s_push_cstr(&screen_buf, ANSI_RESET);
+            } else s_push(&screen_buf, c);
+            if (keep_cursor) s_push_cstr(&screen_buf, ANSI_RESET);
+        }
+        if (is_current_line && editor.in_cmd && len <= editor.cx) {
+            for (size_t x = len; x < editor.cx; x++) {
+                s_push(&screen_buf, ' ');
+            }
+            s_push_cstr(&screen_buf, ANSI_INVERSE);
+            s_push(&screen_buf, ' ');
+            s_push_cstr(&screen_buf, ANSI_RESET);
+        }
+        s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR CRNL);
+    }
+
+    /* Create a two rows status. First row: */
+    s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR);
+    s_push_cstr(&screen_buf, ANSI_INVERSE); // displayed with inversed colours
+
+    char perc_buf[4];
+    if (CURRENT_Y_POS == 0) sprintf(perc_buf, "%s", "Top");
+    else if (CURRENT_Y_POS >= editor.rows.count-1) sprintf(perc_buf, "%s", "Bot");
+    else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
+
+    char status[80];
+    size_t len = snprintf(status, sizeof(status), " %s %c (%zu, %zu) | %zu lines (%s) | page %zu/%zu", 
+            editor.filename == NULL ? "unnamed" : editor.filename, 
+            editor.dirty ? '+' : '-',
+            editor.cx+1-LINES_MAGNITUDE, 
+            CURRENT_Y_POS+1, 
+            editor.rows.count, 
+            perc_buf,
+            editor.page+1,
+            N_PAGES
+    );
+    if (len > editor.screencols) len = editor.screencols;
+    s_push_str(&screen_buf, status, len);
+
+    char rstatus[80];
+    size_t rlen = editor.N == N_DEFAULT ? 0 : snprintf(rstatus, sizeof(rstatus), "%d", editor.N);
+    while (len < editor.screencols && editor.screencols - (len+1) != rlen) {
+        s_push(&screen_buf, ' ');
+        len++;
+    }
+    if (editor.N != N_DEFAULT) s_push_str(&screen_buf, rstatus, rlen);
+    s_push(&screen_buf, ' ');
+    s_push_cstr(&screen_buf, ANSI_RESET CRNL);
+
+    /* Second row depends on editor.message and the message remaining time. */
+    s_push_cstr(&screen_buf, ANSI_ERASE_LINE_FROM_CURSOR);
+    if (editor.in_cmd) {
+        s_push_cstr(&screen_buf, "Command: ");
+        s_push_str(&screen_buf, editor.cmd.items, editor.cmd.count);
+    } else if (!da_is_empty(&editor.messages)) {
+        char *msg = editor.messages.items[0];
+        if (time(NULL)-editor.current_msg_time > config.msg_lifetime) msg = next_message();
+        if (msg) s_push_cstr(&screen_buf, msg);
+    }
+
+    /* Put cursor at its current position. Note that the horizontal position
+     * at which the cursor is displayed may be different compared to 'editor.cx'
+     * because of TABs. */
+    size_t cx = editor.cx+1;
+    size_t cy = editor.cy+1;
+    if (editor.in_cmd) {
+        cx = strlen("Command: ")+editor.cmd_pos+1;
+        cy = editor.screencols-1;
+    } else {
+        size_t y = CURRENT_Y_POS;
+        if (y < editor.rows.count) {
+            Row *row = ROW(y);
+            size_t rowlen = strlen(row->content.items);
+            for (size_t j = editor.coloff; j < (CURRENT_X_POS); j++) {
+                if (j < rowlen && row->content.items[j] == TAB) cx += 4;
+            }
+        }
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%zu;%zuH", cy, cx);
+    s_push_str(&screen_buf, buf, strlen(buf));
+
+    s_push_cstr(&screen_buf, ANSI_SHOW_CURSOR);
+    s_push_null(&screen_buf);
+    write(STDOUT_FILENO, screen_buf.items, screen_buf.count);
+    s_clear(&screen_buf);
+}
+
+void handle_sigwinch(int signo)
+{
+    (void)signo;
+    update_window_size();
+    if (editor.cy > editor.screenrows) editor.cy = editor.screenrows - 1;
+    if (editor.cx > editor.screencols) editor.cx = editor.screencols - 1;
+    refresh_screen();
 }
 
 void initialize()
@@ -1704,9 +1746,22 @@ void builtin_insert(const Command *cmd)
 
 }
 
+void builtin_date(void)
+{
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    char date[64];
+    assert(strftime(date, sizeof(date), "%c", tm));
+    size_t len = strlen(date);
+    for (size_t i = 0; i < len; i++) {
+        insert_char(date[i]);
+    }
+
+}
+
 void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorre con ALT_k e ALT_j
 {
-    static_assert(BUILTIN_CMDS_COUNT == 11, "Execute all commands in execute_cmd");
+    static_assert(BUILTIN_CMDS_COUNT == 12, "Execute all commands in execute_cmd");
     for (size_t i = 0; i < cmd->n; i++ ) {
         switch (cmd->type)
         {
@@ -1721,6 +1776,7 @@ void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorr
             case BUILTIN_MOVE_LINE_UP     : builtin_move_line_up();      break;
             case BUILTIN_MOVE_LINE_DOWN   : builtin_move_line_down();    break;
             case BUILTIN_INSERT           : builtin_insert(cmd);         break;
+            case BUILTIN_DATE             : builtin_date();              break;
             case UNKNOWN: enqueue_message("Unknown command `%s`", cmd->name); break;
             case BUILTIN_CMDS_COUNT:
                 fprintf(stderr, CRNL "Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
