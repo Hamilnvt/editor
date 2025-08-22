@@ -5,8 +5,7 @@
     - commands_history_cap (config?)
     - needs_redraw technology (ma prima deve funzionare tutto il resto)
     - capire come leggere ctrl-shift-x
-    - numeri della linea e relativi/assoluti (config)
-        > comando per spostarsi ad una riga precisa
+    - comando per spostarsi ad una riga precisa
     - comando che stampa l'elenco dei comandi (builtin + user defined)
     - config:
       > aggiungere una descrizione ai campi da mostrare in caso di errore/assenza del campo
@@ -99,10 +98,10 @@ static Editor editor = {0};
 #define N_OR_DEFAULT(n) ((size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
 #define N_TIMES for (size_t i = 0; i < N_OR_DEFAULT(1); i++)
 
-#define LINES_MAGNITUDE ((size_t)log10(editor.rows.count)+1)
+#define LINE_NUMBERS_SPACE (config.line_numbers == LN_NO ? 0 : (size_t)log10(editor.rows.count)+2)
 #define CRNL "\r\n"
 #define CURRENT_Y_POS (editor.rowoff+editor.cy) 
-#define CURRENT_X_POS (editor.coloff+editor.cx+LINES_MAGNITUDE) 
+#define CURRENT_X_POS (editor.coloff+editor.cx-LINE_NUMBERS_SPACE) 
 #define ROW(i) (&editor.rows.items[i])
 #define CHAR(row, i) (ROW(row)->content.items[i])
 #define CURRENT_ROW ROW(CURRENT_Y_POS)
@@ -116,10 +115,13 @@ static Editor editor = {0};
 #define ANSI_ERASE_LINE_FROM_CURSOR "\x1b[K"
 #define ANSI_CLEAR_SCREEN "\x1b[2J"
 #define ANSI_INVERSE "\x1b[7m"
+#define ANSI_FG_COLOR(rgb_color) "\x1b[38;2;"rgb_color"m"
 #define ANSI_RESET "\x1b[0m"
 #define ANSI_SAVE_CURSOR "\x1b[s"
 #define ANSI_RESTORE_CURSOR "\x1b[u"
-///
+
+/* Colors */
+#define COLOR_YELLOW "178;181;0"
 
 typedef enum
 {
@@ -188,7 +190,7 @@ void enqueue_message(const char *fmt, ...)
     va_start(ap, fmt);
     char buf[1024] = {0};
     vsnprintf(buf, editor.screencols, fmt, ap);
-    da_push(&editor.messages, strdup(buf)); // TODO: rember to free
+    da_push(&editor.messages, strdup(buf)); // NOTE: rember to free
     va_end(ap);
 }
 
@@ -218,13 +220,14 @@ typedef enum
     BUILTIN_MOVE_LINE_DOWN,
     BUILTIN_INSERT,
     BUILTIN_DATE,
+    BUILTIN_GOTO_LINE,
     BUILTIN_CMDS_COUNT,
     UNKNOWN,
     CLI,
     USER_DEFINED,
 } CommandType;
 
-static_assert(BUILTIN_CMDS_COUNT == 12, "Associate a name to all builtin commands");
+static_assert(BUILTIN_CMDS_COUNT == 13, "Associate a name to all builtin commands");
 /* NOTE: name of the builtin commands */
 #define SAVE              "s"
 #define QUIT              "q"
@@ -238,6 +241,7 @@ static_assert(BUILTIN_CMDS_COUNT == 12, "Associate a name to all builtin command
 #define MOVE_LINE_DOWN    "lnd"
 #define INSERT            "i"
 #define DATE              "date"
+#define GOTO_LINE         "goto"
 
 typedef enum
 {
@@ -337,7 +341,7 @@ bool expect_n_arguments(const Command *cmd, size_t n)
 
 CommandType parse_cmdtype(char *type)
 {
-    static_assert(BUILTIN_CMDS_COUNT == 12, "Parse all commands in parse_cmd");
+    static_assert(BUILTIN_CMDS_COUNT == 13, "Parse all commands in parse_cmd");
     if      (streq(type, SAVE))              return BUILTIN_SAVE;
     else if (streq(type, QUIT))              return BUILTIN_QUIT;
     else if (streq(type, SAVE_AND_QUIT))     return BUILTIN_SAVE_AND_QUIT;
@@ -350,6 +354,7 @@ CommandType parse_cmdtype(char *type)
     else if (streq(type, MOVE_LINE_DOWN))    return BUILTIN_MOVE_LINE_DOWN;
     else if (streq(type, INSERT))            return BUILTIN_INSERT;
     else if (streq(type, DATE))              return BUILTIN_DATE;
+    else if (streq(type, GOTO_LINE))         return BUILTIN_GOTO_LINE;
     else {
         for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
             if (streq(type, commands.items[i].name))
@@ -442,7 +447,7 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
             if (n <= 0) {
                 char *error = malloc(sizeof(char)*256);
                 if (sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n) == -1) {
-                    fprintf(stderr, CRNL "Could not allocate memoy, buy more RAM" CRNL);
+                    fprintf(stderr, CRNL "Could not allocate memory, buy more RAM" CRNL);
                     exit(1);
                 } else {
                     return error;
@@ -499,10 +504,19 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
                     CommandArg actual_arg = *ref_arg;
                     switch (ref_arg->type)
                     {
-                        case ARG_UINT:
-                            enqueue_message("TODO: parse uint arg `%s`", arg);
-                            log_this("TODO: parse uint arg `%s`", arg);
-                            break;
+                        case ARG_UINT: {
+                            size_t value = atoi(arg);
+                            if (value == 0 && !streq(arg, "0")) {
+                                char *error = malloc(sizeof(char)*256);
+                                // TODO: track location
+                                if (sprintf(error, "expecting a number greater than 0, but got `%s`", arg) == -1) {
+                                    fprintf(stderr, CRNL "Could not allocate memory, buy more RAM" CRNL);
+                                    exit(1);
+                                } else return error;
+                            }
+                            actual_arg.value = malloc(sizeof(size_t)); // NOTE: rember to free
+                            *(size_t *)actual_arg.value = value;
+                        } break;
                         case ARG_STRING:
                             // TODO: allora, devo farlo a mano e devo prima cercare negli argomenti se ce ne sono ancora (caso "ciao,come,stai"), altrimenti continuo con la line (caso "ciao come stai"), poi salvo la fine in saveptr_cmds e da li' si continua con gli altri comandi
                             if (*arg == '\"') {
@@ -548,7 +562,7 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
                             }
                             // TODO: add support for char '\n' in string arg
                             // TODO: add support for char '"' in string arg
-                            actual_arg.value = strdup(arg); // TODO: rember to free
+                            actual_arg.value = strdup(arg); // NOTE: rember to free
                             break;
                         default:
                             fprintf(stderr, "Unreachable command arg type %u in parse_cmds\n", ref_arg->type);
@@ -565,12 +579,19 @@ char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location
     return NULL;
 }
 
-void trim_left(char **str) { while (isspace(**str)) *str += 1; }
-void trim_right(char *str)
+size_t trim_left(char **str)
+{
+    char *tmp = *str;
+    while (isspace(**str)) *str += 1;
+    return *str - tmp;
+}
+size_t trim_right(char *str)
 {
     char *end = str+strlen(str)-1;
+    char *tmp = end;
     while (isspace(*end)) end--;
     *(end+1) = '\0';
+    return tmp - end;
 }
 void trim(char **str)
 {
@@ -580,10 +601,49 @@ void trim(char **str)
 
 char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
 {
-    (void)cmds;
     (void)cmd_args;
-    (void)loc;
+
+    if (loc) loc->col += trim_left(&cmds_str);
     log_this("TODO: parse cmds from `%s`", cmds_str);
+    da_init(cmds, 2, DA_DEFAULT_FAC);
+    size_t i = 0;
+    size_t len = strlen(cmds_str);
+    while (i < len) {
+        Command cmd = {0};
+
+        if (isdigit(*cmds_str)) {
+            char *end_of_n;
+            long n = strtol(cmds_str, &end_of_n, 10);
+            if (n <= 0) {
+                char *error = malloc(sizeof(char)*256);
+                if (sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n) == -1) {
+                    fprintf(stderr, CRNL "Could not allocate memory, buy more RAM" CRNL);
+                    exit(1);
+                } else {
+                    return error;
+                }
+            } else cmd.n = n;
+            if (loc) loc->col += end_of_n - cmds_str;
+            i += end_of_n - cmds_str;
+            cmds_str = end_of_n;
+        } else cmd.n = 1;
+        log_this("multiplicity: %zu", cmd.n);
+
+        char *end_of_cmd_name = strpbrk(cmds_str, " \t(");
+        if (end_of_cmd_name != NULL) *end_of_cmd_name = '\0';
+        cmd.type = parse_cmdtype(cmds_str);
+        if (cmd.type == UNKNOWN) {
+            char *error = malloc(sizeof(char)*256);
+            if (sprintf(error, "unknown command `%s`", cmds_str) == -1) {
+                fprintf(stderr, CRNL "Could not allocate memory, buy more RAM" CRNL);
+                exit(1);
+            } else return error;
+        } else log_this("name: `%s` => type: %d", cmds_str, cmd.type);
+
+        // TODO: parse arguments in parenthesis if present
+        break;
+    }
+
     return NULL;
 }
 /// END Commands
@@ -663,12 +723,13 @@ void load_config()
 
     const size_t default_quit_times = 3;
     const size_t default_msg_lifetime = 3;
-    const char *default_line_numbers = "relative";
+    const char *default_line_numbers = "no";
 
     const char *valid_values_field_bool[] = {"true", "false", NULL};
     const char *valid_values_line_numbers[] = {"no", "absolute", "relative", NULL};
 
     String config_log = s_new_empty();
+
     const char *config_path = ".config/editor/config";
     char full_config_path[256] = {0};
     sprintf(full_config_path, "%s/%s", home, config_path);
@@ -711,7 +772,7 @@ void load_config()
 
     // commands initialization
     da_init(&commands, BUILTIN_CMDS_COUNT-1, DA_DEFAULT_FAC);
-    static_assert(BUILTIN_CMDS_COUNT == 12, "Add all builtin commands in commands");
+    static_assert(BUILTIN_CMDS_COUNT == 13, "Add all builtin commands in commands");
     add_builtin_command(SAVE,              BUILTIN_SAVE,              (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
     add_builtin_command(QUIT,              BUILTIN_QUIT,              (CommandArgs){0});
     add_builtin_command(SAVE_AND_QUIT,     BUILTIN_SAVE_AND_QUIT,     (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
@@ -727,13 +788,17 @@ void load_config()
     da_init(&cmd_args, 2, DA_DEFAULT_FAC);
     CommandArg cmd_arg;
 
-
     cmd_arg = (CommandArg){.value = NULL, .type=ARG_STRING, .needed=true};
     da_push(&cmd_args, cmd_arg);
     add_builtin_command(INSERT, BUILTIN_INSERT, cmd_args);
     da_clear(&cmd_args);
 
     add_builtin_command(DATE, BUILTIN_DATE, (CommandArgs){0});
+
+    cmd_arg = (CommandArg){.value = NULL, .type=ARG_UINT, .needed=true};
+    da_push(&cmd_args, cmd_arg);
+    add_builtin_command(GOTO_LINE, BUILTIN_GOTO_LINE, cmd_args);
+    da_clear(&cmd_args);
 
     Location loc = {0};
     ssize_t res; 
@@ -748,29 +813,20 @@ void load_config()
         }
         char *line = full_line;
         line[res] = '\0';
-        while (isspace(*line)) {
-            line++;
-            res--;
-            loc.col++;
-        }
+        loc.col += trim_left(&line);
         if (res == 0) {
             loc.row++;
             loc.col = 0;
             continue;
         }
-        char *end = line+res-1;
-        while (isspace(*end)) {
-            end--;
-            res--;
-        }
-        *(end+1) = '\0';
 
         char *comment = strstr(line, "//");
-        if (comment != NULL) *comment = '\0';
-        if (strlen(line) == 0) {
-            loc.row++;
-            loc.col = 0;
-            continue;
+        if (comment != NULL) {
+            if (comment == line) {
+                loc.row++;
+                loc.col = 0;
+                continue;
+            } else *comment = '\0';
         }
 
         char *colon = NULL;
@@ -803,12 +859,17 @@ void load_config()
                 char *cmds = colon+1;
                 Commands cmd_def = {0};
                 CommandArgs cmd_args = {0};
-                char *parse_error = parse_cmds(cmds, &cmd_def, &cmd_args, &loc);
+                // TODO: WIP
+                //char *parse_error = parse_cmds(cmds, &cmd_def, &cmd_args, &loc);
+                char *parse_error = better_parse_cmds(cmds, &cmd_def, &cmd_args, &loc);
                 if (parse_error != NULL) {
                     s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                     s_push_fstr(&config_log, "ERROR: %s\n", parse_error);
                     free(parse_error);
-                } else add_user_command(cmd_name, cmd_args, cmd_def);
+                } else {
+                    //add_user_command(cmd_name, cmd_args, cmd_def);
+                    s_push_fstr(&config_log, "TODO: add command `%s`\n", cmd_name);
+                }
             }
         } else if ((colon = strchr(line, ':')) != NULL) {
             *colon = '\0';
@@ -881,6 +942,7 @@ void load_config()
                                 }
                             }
                             if (!is_valid || is_str_empty) {
+                                is_valid = false;
                                 s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                                 s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
                                 for (size_t j = 0; j < arrlen; j++) {
@@ -897,16 +959,9 @@ void load_config()
 
                                 value = *(char **)removed_field.thefault;
                             }
+                            if (!is_valid) i = 0;
                             if (streq(field_name, "line_numbers")) {
-                                ConfigLineNumbers result = LN_REL;
-                                if (streq(value, default_line_numbers)) result = LN_REL;
-                                else if (streq(value, "absolute")) result = LN_ABS;
-                                else if (streq(value, "no")) result = LN_NO;
-                                //else { // TODO: mi sembra un po' too much
-                                //    fprintf(stderr, "Unreachable field value `%s` for `%s` in load_config\n", value, field_name); 
-                                //    abort();
-                                //}
-                                *((ConfigLineNumbers *)removed_field.ptr) = result;
+                                *((ConfigLineNumbers *)removed_field.ptr) = i;
                             } else { // NOTE: this is useful in case I forget to implement one
                                 fprintf(stderr, "Unreachable field name `%s` in load_config\n", field_name); 
                                 abort();
@@ -988,10 +1043,8 @@ void load_config()
         s_push_null(&config_log);
         s_print(config_log);
         printf("\n\n-- Press ENTER to continue --\n");
-        printf(ANSI_HIDE_CURSOR"\n");
         while (getc(stdin) != '\n')
             ;
-        printf(ANSI_SHOW_CURSOR"\n");
     }
 }
 
@@ -1223,27 +1276,36 @@ void refresh_screen(void)
 
         row = ROW(y);
 
-        // TODO: test it
         if (config.line_numbers == LN_REL) {
-            size_t rel_num = is_current_line ? y : (y > CURRENT_Y_POS ? y-CURRENT_Y_POS : CURRENT_Y_POS-y);
-            size_t line_mag = log10(rel_num+1);
-            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
+            if (is_current_line) {
+                size_t line_mag = y == 0 ? 1 : log10(y)+1;
+                size_t spaces_to_add = LINE_NUMBERS_SPACE-line_mag-1;
+                if ((size_t)(log10(y+1)+1) > line_mag) spaces_to_add--;
+                for (size_t x = 0; x < spaces_to_add; x++) 
+                    s_push(&screen_buf, ' '); 
+                s_push_cstr(&screen_buf, ANSI_FG_COLOR(COLOR_YELLOW));
+                s_push_fstr(&screen_buf, "%zu", y+1); 
+                s_push_cstr(&screen_buf, ANSI_RESET);
                 s_push(&screen_buf, ' '); 
-            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
-            s_push_fstr(&screen_buf, "%zu", rel_num); 
-            if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
+            } else {
+                size_t rel_num = y > CURRENT_Y_POS ? y-CURRENT_Y_POS : CURRENT_Y_POS-y;
+                size_t line_mag = rel_num == 0 ? 1 : log10(rel_num)+1;
+                for (size_t x = 0; x < LINE_NUMBERS_SPACE-line_mag-1; x++) 
+                    s_push(&screen_buf, ' '); 
+                s_push_fstr(&screen_buf, "%zu ", rel_num);
+            }
         } else if (config.line_numbers == LN_ABS) {
-            size_t line_mag = log10(y+1);
-            for (size_t x = 0; x < LINES_MAGNITUDE-line_mag-1; x++)
+            size_t line_mag = y == 0 ? 1 : log10(y)+1;
+            for (size_t x = 0; x < LINE_NUMBERS_SPACE-line_mag-1; x++)
                 s_push(&screen_buf, ' '); 
-            if (is_current_line) s_push_cstr(&screen_buf, ANSI_INVERSE);
-            s_push_fstr(&screen_buf, "%zu", y+1); 
+            if (is_current_line) s_push_cstr(&screen_buf, ANSI_FG_COLOR(COLOR_YELLOW));
+                s_push_fstr(&screen_buf, "%zu", y+1); 
             if (is_current_line) s_push_cstr(&screen_buf, ANSI_RESET);
+            s_push(&screen_buf, ' '); 
         }
-        s_push(&screen_buf, ' '); 
 
         size_t len = row->content.count - editor.coloff;
-        if (len > editor.screencols-(LINES_MAGNITUDE)) len = editor.screencols-(LINES_MAGNITUDE); // TODO: viene troncata la riga
+        if (len > editor.screencols-LINE_NUMBERS_SPACE) len = editor.screencols-LINE_NUMBERS_SPACE; // TODO: viene troncata la riga
         if (len == 0) {
             if (is_current_line && editor.in_cmd) {
                 for (size_t x = 0; x < editor.cx; x++) {
@@ -1296,7 +1358,7 @@ void refresh_screen(void)
     size_t len = snprintf(status, sizeof(status), " %s %c (%zu, %zu) | %zu lines (%s) | page %zu/%zu", 
             editor.filename == NULL ? "unnamed" : editor.filename, 
             editor.dirty ? '+' : '-',
-            editor.cx+1-LINES_MAGNITUDE, 
+            editor.cx+1-LINE_NUMBERS_SPACE,
             CURRENT_Y_POS+1, 
             editor.rows.count, 
             perc_buf,
@@ -1431,7 +1493,7 @@ void open_file(char *filename)
         da_push(&editor.rows, row);
     }
     free(line);
-    editor.cx = LINES_MAGNITUDE+1;
+    editor.cx = LINE_NUMBERS_SPACE;
 }
 
 // TODO: now it's trivial
@@ -1462,8 +1524,8 @@ void builtin_move_cursor_left()
         if (editor.cmd_pos > 0) editor.cmd_pos -= 1;
         else editor.cmd_pos = 0;
     } else {
-        if (editor.cx > LINES_MAGNITUDE) editor.cx -= 1;
-        else editor.cx = LINES_MAGNITUDE;
+        if (editor.cx > LINE_NUMBERS_SPACE) editor.cx -= 1;
+        else editor.cx = LINE_NUMBERS_SPACE;
     }
 }
 
@@ -1527,7 +1589,7 @@ void move_cursor_end_of_file()
     editor.cy = editor.screenrows-1;
 }
 
-void move_cursor_begin_of_line() { editor.cx = LINES_MAGNITUDE; }
+void move_cursor_begin_of_line() { editor.cx = LINE_NUMBERS_SPACE; }
 
 void move_cursor_end_of_line()   { editor.cx = editor.screencols-1; } // TODO: coloff
 
@@ -1535,7 +1597,7 @@ void move_cursor_first_non_space()
 {
     Row *row = CURRENT_ROW;
     char *str = row->content.items;
-    editor.cx = LINES_MAGNITUDE;
+    editor.cx = LINE_NUMBERS_SPACE;
     while (*str != '\0' && isspace(*str)) {
         editor.cx++;
         str++;
@@ -1547,11 +1609,14 @@ void move_cursor_last_non_space()
     Row *row = CURRENT_ROW;
     char *str = row->content.items;
     size_t len = strlen(str);
-    if (len == 0) return;
-    int i = len - 1;
-    while (i >= 0 && isspace(str[i]))
+    if (len == 0) {
+        editor.cx = LINE_NUMBERS_SPACE;
+        return;
+    }
+    size_t i = len - 1;
+    while (isspace(str[i]))
         i--;
-    editor.cx = LINES_MAGNITUDE + i == editor.screencols-1 ? i : i+1;
+    editor.cx = LINE_NUMBERS_SPACE + (i == editor.screencols-1 ? i : i+1);
 }
 
 void itoa(int n, char *buf)
@@ -1717,7 +1782,7 @@ void insert_char(char c)
         }
         if (editor.cy == editor.screenrows-1) editor.rowoff++;
         else editor.cy++;
-        editor.cx = LINES_MAGNITUDE;
+        editor.cx = LINE_NUMBERS_SPACE;
         editor.coloff = 0;
     } else {
         if (y >= editor.rows.count) {
@@ -1737,13 +1802,11 @@ void insert_char(char c)
 void builtin_insert(const Command *cmd)
 {
     if (!expect_n_arguments(cmd, 1)) return;
-
     char *str = cmd->args.items[0].value;
     size_t len = strlen(str);
     for (size_t j = 0; j < len; j++) {
         insert_char(str[j]);
     }
-
 }
 
 void builtin_date(void)
@@ -1759,9 +1822,16 @@ void builtin_date(void)
 
 }
 
-void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorre con ALT_k e ALT_j
+void builtin_goto_line(const Command *cmd)
 {
-    static_assert(BUILTIN_CMDS_COUNT == 12, "Execute all commands in execute_cmd");
+    if (!expect_n_arguments(cmd, 1)) return;
+    size_t line = *(size_t *)cmd->args.items[0].value;
+    enqueue_message("TODO: goto line %zu", line);
+}
+
+void execute_cmd(const Command *cmd)
+{
+    static_assert(BUILTIN_CMDS_COUNT == 13, "Execute all commands in execute_cmd");
     for (size_t i = 0; i < cmd->n; i++ ) {
         switch (cmd->type)
         {
@@ -1777,6 +1847,7 @@ void execute_cmd(const Command *cmd) // TODO: storia dei comandi usati, si scorr
             case BUILTIN_MOVE_LINE_DOWN   : builtin_move_line_down();    break;
             case BUILTIN_INSERT           : builtin_insert(cmd);         break;
             case BUILTIN_DATE             : builtin_date();              break;
+            case BUILTIN_GOTO_LINE        : builtin_goto_line(cmd);      break;
             case UNKNOWN: enqueue_message("Unknown command `%s`", cmd->name); break;
             case BUILTIN_CMDS_COUNT:
                 fprintf(stderr, CRNL "Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
@@ -1838,12 +1909,11 @@ void delete_char()
         Row *prev = ROW(y-1);
         x = prev->content.count;
         s_push_str(&prev->content, row->content.items, row->content.count);
-        Row _;
-        (void)_;
+        Row _; (void)_;
         da_remove(&editor.rows, (int)y, _);
         if (editor.cy == 0) editor.rowoff--;
         else editor.cy--;
-        editor.cx = x+LINES_MAGNITUDE;
+        editor.cx = x+LINE_NUMBERS_SPACE;
         if (editor.cx >= editor.screencols) {
             int shift = (editor.screencols-editor.cx)+1;
             editor.cx -= shift;
@@ -1851,7 +1921,7 @@ void delete_char()
         }
     } else {
         delete_char_at(row, x-1);
-        if (editor.cx == 0 && editor.coloff) editor.coloff--;
+        if (editor.cx == LINE_NUMBERS_SPACE && editor.coloff) editor.coloff--;
         else editor.cx--;
     }
     editor.dirty++;
@@ -2026,8 +2096,6 @@ int main(int argc, char **argv)
     initialize();
     open_file(filename);
     enable_raw_mode();
-
-    log_this("lines magnitude: %u", LINES_MAGNITUDE);
 
     while (true) {
         refresh_screen();

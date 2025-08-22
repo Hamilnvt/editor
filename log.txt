@@ -1,83 +1,209 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TODO: parse cmds from ` i. `
+TODO: parse cmds from ` i.ciao`
+TODO: parse cmds from ` i."string"`
+TODO: parse cmds from ` i."ciao,caro" `
+TODO: parse cmds from ` i."spazi  e altro "`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from ` i. `
+TODO: parse cmds from ` i.ciao`
+TODO: parse cmds from ` i."string"`
+TODO: parse cmds from ` i."ciao,caro" `
+TODO: parse cmds from ` i."spazi  e altro "`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from ` i. `
+TODO: parse cmds from ` i.ciao`
+TODO: parse cmds from ` i."string"`
+TODO: parse cmds from ` i."ciao,caro" `
+TODO: parse cmds from ` i."spazi  e altro "`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from ` i. `
+TODO: parse cmds from ` i.ciao`
+TODO: parse cmds from ` i."string"`
+TODO: parse cmds from ` i."ciao,caro" `
+TODO: parse cmds from ` i."spazi  e altro "`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from ` i. `
+TODO: parse cmds from ` i.ciao`
+TODO: parse cmds from ` i."string"`
+TODO: parse cmds from ` i."ciao,caro" `
+TODO: parse cmds from ` i."spazi  e altro "`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from ` i. `
+TODO: parse cmds from ` i.ciao`
+TODO: parse cmds from ` i."string"`
+TODO: parse cmds from ` i."ciao,caro" `
+TODO: parse cmds from ` i."spazi  e altro "`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from ` i. `
+TODO: parse cmds from ` i.ciao`
+TODO: parse cmds from ` i."string"`
+TODO: parse cmds from ` i."ciao,caro" `
+TODO: parse cmds from ` i."spazi  e altro "`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from ` i. `
+multiplicity: 1
+TODO: parse cmds from ` i.ciao`
+multiplicity: 1
+TODO: parse cmds from ` i."string"`
+multiplicity: 1
+TODO: parse cmds from ` i."ciao,caro" `
+multiplicity: 1
+TODO: parse cmds from ` i."spazi  e altro "`
+multiplicity: 1
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-Adding command in history: `date`
-Adding command in history: `date`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-Adding command in history: `date`
-Adding command in history: `date`
+TODO: parse cmds from ` 4i. `
+multiplicity: 1
+TODO: parse cmds from ` i.ciao`
+multiplicity: 1
+TODO: parse cmds from ` i."string"`
+multiplicity: 1
+TODO: parse cmds from ` i."ciao,caro" `
+multiplicity: 1
+TODO: parse cmds from ` i."spazi  e altro "`
+multiplicity: 1
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-Adding command in history: `datee`
-Adding command in history: `date`
-Adding command in history: `date`
-Adding command in history: `slkjdf`
-Adding command in history: `sldkfj`
+TODO: parse cmds from `4i. `
+multiplicity: 4
+TODO: parse cmds from `i.ciao`
+multiplicity: 1
+TODO: parse cmds from `i."string"`
+multiplicity: 1
+TODO: parse cmds from `i."ciao,caro" `
+multiplicity: 1
+TODO: parse cmds from `i."spazi  e altro "`
+multiplicity: 1
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-Adding command in history: `date`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
-Adding command in history: `date`
+TODO: parse cmds from `4i. `
+multiplicity: 4
+TODO: parse cmds from `i.ciao`
+multiplicity: 1
+TODO: parse cmds from `i."string"`
+multiplicity: 1
+TODO: parse cmds from `i."ciao,caro" `
+multiplicity: 1
+TODO: parse cmds from `i."spazi  e altro "`
+multiplicity: 1
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-lines magnitude: 2
+TODO: parse cmds from `4i. `
+multiplicity: 4
+TODO: parse cmds from `i.ciao`
+multiplicity: 1
+TODO: parse cmds from `i."string"`
+multiplicity: 1
+TODO: parse cmds from `i."ciao,caro" `
+multiplicity: 1
+TODO: parse cmds from `i."spazi  e altro "`
+multiplicity: 1
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TODO: parse cmds from `4i( `
+multiplicity: 4
+name: `i` => type: 10
+TODO: parse cmds from `i(ciao)`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("string")`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("ciao,caro") `
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("spazi  e altro ")`
+multiplicity: 1
+name: `i` => type: 10
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TODO: parse cmds from `4i( `
+multiplicity: 4
+name: `i` => type: 10
+TODO: parse cmds from `i(ciao)`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("today: ") date`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("ciao,caro") `
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("spazi  e altro ")`
+multiplicity: 1
+name: `i` => type: 10
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TODO: parse cmds from `4i( `
+multiplicity: 4
+name: `i` => type: 10
+TODO: parse cmds from `i(ciao)`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `date i(" (today)")`
+multiplicity: 1
+name: `date` => type: 11
+TODO: parse cmds from `i("ciao,caro") `
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("spazi  e altro ")`
+multiplicity: 1
+name: `i` => type: 10
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TODO: parse cmds from `4i( `
+multiplicity: 4
+name: `i` => type: 10
+TODO: parse cmds from `i(ciao)`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `date i(" (today)")`
+multiplicity: 1
+name: `date` => type: 11
+TODO: parse cmds from `i("ciao,caro") `
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("spazi  e altro ")`
+multiplicity: 1
+name: `i` => type: 10
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TODO: parse cmds from `date i(" (today)")`
+multiplicity: 1
+name: `date` => type: 11
+TODO: parse cmds from `4i( `
+multiplicity: 4
+name: `i` => type: 10
+TODO: parse cmds from `i(ciao)`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("ciao,caro") `
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse cmds from `i("spazi  e altro ")`
+multiplicity: 1
+name: `i` => type: 10
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
