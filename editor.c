@@ -15,11 +15,12 @@
         - forse e' meglio che gli argomenti vengano passati tra parentesi
             ad esempio => #cmd: c1(arg1, arg2) c2 c3(nome="palle sudate")
         - gestione degli argomenti dei comandi definiti dall'utente, magari $0 oppure {0}
-            > esempio 1. #cmd: ciao sono {} il {} => `cmd.tanica,tastiere`
-            > esempio 2. #cmd: daje.{0} => `cmd.roma`
-            > esempio 3. #cmd: ciao.{nome} come stai => `cmd.mario` oppure `cmd.nome=mario`
-            > esempio 4. #cmd: ciao.{nome=Tanica} come stai => `cmd` == `cmd.Tanica`
+            > esempio 1. #cmd: ciao sono {} il {} => `cmd(tanica,tastiere)`
+            > esempio 2. #cmd: daje({0}) => `cmd(roma)`
+            > esempio 3. #cmd: ciao({nome}) come stai => `cmd(mario)` oppure `cmd(nome=mario)`
+            > esempio 4. #cmd: ciao({nome=Tanica}) come stai => `cmd` == `cmd.Tanica`
       > possibilita' di assegnare comandi a combinazioni di tasti (questo sembra essere molto difficile, non ho idea di come si possa fare)
+    - autocompletion dei comandi, con TAB vai all'argomento successivo
     - sistema di registrazione macro (comandi temporanei a cui magari si puo' dare un nome e le si esegue come comandi o con shortcut)
         > possibilita' di salvarli come comandi aggiungendoli direttamente al config
     - funzioni separate per la modifica della command line (altrimenti non si capisce niente)
@@ -31,7 +32,7 @@
         > ifTAB => if (COND) {\n BODY \n}
         > con TAB ulteriori vai avanti nei vari blocchi
         > sintassi?
-    - comando set.config_var
+    - comando set(config_var, value)
 
 */
 
@@ -630,7 +631,11 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
         log_this("multiplicity: %zu", cmd.n);
 
         char *end_of_cmd_name = strpbrk(cmds_str, " \t(");
-        if (end_of_cmd_name != NULL) *end_of_cmd_name = '\0';
+        bool has_args = false;
+        if (end_of_cmd_name != NULL) {
+            if (*end_of_cmd_name == '(') has_args = true;
+            *end_of_cmd_name = '\0';
+        }
         cmd.type = parse_cmdtype(cmds_str);
         if (cmd.type == UNKNOWN) {
             char *error = malloc(sizeof(char)*256);
@@ -640,8 +645,25 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
             } else return error;
         } else log_this("name: `%s` => type: %d", cmds_str, cmd.type);
 
-        // TODO: parse arguments in parenthesis if present
-        break;
+        size_t name_len = strlen(cmds_str);
+        cmds_str += name_len + 1;
+        if (loc) loc->col += name_len;
+
+        // TODO:
+        // - parse strings
+        // - allow \( and \) in strings
+        // - allow \n in strings
+        // - allow \" in strings
+        if (has_args) {
+            char *end_of_cmd_args = strchr(cmds_str, ')');
+            if (end_of_cmd_args == NULL) return strdup("unclosed arguments parenthesis");
+            else *end_of_cmd_args = '\0';
+            // TODO: parse arguments in parenthesis
+            if (loc) loc->col += 1 + trim_left(&cmds_str);
+            log_this("TODO: parse arguments `%s`", cmds_str);
+        }
+
+        // TODO: add cmd to cmds
     }
 
     return NULL;
@@ -855,6 +877,7 @@ void load_config()
                     loc.row++;
                     continue;
                 }
+                loc.col += strlen(cmd_name) + 1;
 
                 char *cmds = colon+1;
                 Commands cmd_def = {0};
@@ -867,8 +890,8 @@ void load_config()
                     s_push_fstr(&config_log, "ERROR: %s\n", parse_error);
                     free(parse_error);
                 } else {
-                    //add_user_command(cmd_name, cmd_args, cmd_def);
-                    s_push_fstr(&config_log, "TODO: add command `%s`\n", cmd_name);
+                    add_user_command(cmd_name, cmd_args, cmd_def);
+                    s_push_fstr(&config_log, "added command `%s`\n", cmd_name);
                 }
             }
         } else if ((colon = strchr(line, ':')) != NULL) {
@@ -1739,7 +1762,8 @@ void insert_char(char c)
             };
             Commands subcmds = {0};
             CommandArgs args = {0};
-            char *parse_error = parse_cmds(cmd_str, &subcmds, &args, NULL);
+            char *parse_error = better_parse_cmds(cmd_str, &subcmds, &args, NULL);
+            //char *parse_error = parse_cmds(cmd_str, &subcmds, &args, NULL);
             if (parse_error != NULL) {
                 enqueue_message("ERROR: %s", parse_error);
                 free(parse_error);
@@ -1927,19 +1951,23 @@ void delete_char()
     editor.dirty++;
 }
 
-// TODO: non mi piace come funziona
+// TODO: non funziona
 void delete_word()
 {
     if (editor.in_cmd) {
-        while (editor.cmd_pos > 0 && isspace(editor.cmd.items[editor.cmd_pos])) {
-            da_remove(&editor.cmd, (int)editor.cmd_pos-1, DISCARD_CHAR_RETURN);
-            editor.cmd_pos--;
+        if (isspace(editor.cmd.items[editor.cmd_pos])) {
+            while (editor.cmd_pos > 0 && isspace(editor.cmd.items[editor.cmd_pos])) {
+                da_remove(&editor.cmd, (int)editor.cmd_pos-1, DISCARD_CHAR_RETURN);
+                editor.cmd_pos--;
+            }
+            return;
+        } else {
+            while (editor.cmd_pos > 0 && !isspace(editor.cmd.items[editor.cmd_pos])) {
+                da_remove(&editor.cmd, (int)editor.cmd_pos-1, DISCARD_CHAR_RETURN);
+                editor.cmd_pos--;
+            }
+            return;
         }
-        while (editor.cmd_pos > 0 && !isspace(editor.cmd.items[editor.cmd_pos])) {
-            da_remove(&editor.cmd, (int)editor.cmd_pos-1, DISCARD_CHAR_RETURN);
-            editor.cmd_pos--;
-        }
-        return;
     }
 
     size_t y = CURRENT_Y_POS;
@@ -1947,17 +1975,21 @@ void delete_word()
     size_t x = CURRENT_X_POS;
     if (x == 0 && y == 0) return;
     Row *row = CURRENT_ROW;
-    while (x > 0 && isspace(CHAR(CURRENT_Y_POS, x))) {
-        delete_char_at(row, x-1);
-        x--;
-        editor.cx--;
-    }
-    while (x > 0 && !isspace(CHAR(CURRENT_Y_POS, x))) {
-        delete_char_at(row, x-1);
-        x--;
-        editor.cx--;
-    }
     editor.dirty++;
+    if (isspace(CHAR(CURRENT_Y_POS, x))) {
+        while (x > 0 && isspace(CHAR(CURRENT_Y_POS, x))) {
+            delete_char_at(row, x-1);
+            x--;
+            editor.cx--;
+        }
+        return;
+    } else {
+        while (x > 0 && !isspace(CHAR(CURRENT_Y_POS, x))) {
+            delete_char_at(row, x-1);
+            x--;
+            editor.cx--;
+        }
+    }
 }
 
 void process_pressed_key(void)
