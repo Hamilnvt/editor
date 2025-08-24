@@ -1,154 +1,15 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(palle`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse cmds from `date i(" (today)")`
-multiplicity: 1
-name: `date` => type: 11
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `" (today`
-multiplicity: 1
 TODO: parse cmds from `i(ciao)`
 multiplicity: 1
 name: `i` => type: 10
 TODO: parse arguments `ciao`
-multiplicity: 1
 TODO: parse cmds from `i("ciao,caro") `
 multiplicity: 1
 name: `i` => type: 10
 TODO: parse arguments `"ciao,caro"`
-multiplicity: 1
-TODO: parse cmds from `i("spazi  e altro ")`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"spazi  e altro "`
-multiplicity: 1
 TODO: parse cmds from `3r`
 multiplicity: 3
 name: `r` => type: 7
-multiplicity: 1
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(palle`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse cmds from `date i(" (today)")`
-multiplicity: 1
-name: `date` => type: 11
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `" (today`
-multiplicity: 1
-TODO: parse cmds from `i(ciao)`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `ciao`
-multiplicity: 1
-TODO: parse cmds from `i("ciao,caro") `
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-multiplicity: 1
-TODO: parse cmds from `i("spazi  e altro ")`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"spazi  e altro "`
-multiplicity: 1
-TODO: parse cmds from `3r`
-multiplicity: 3
-name: `r` => type: 7
-multiplicity: 1
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(palle`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse cmds from `date i(" (today)")`
-multiplicity: 1
-name: `date` => type: 11
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `" (today`
-multiplicity: 1
-TODO: parse cmds from `i(ciao)`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `ciao`
-multiplicity: 1
-TODO: parse cmds from `i("ciao,caro") `
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-multiplicity: 1
-TODO: parse cmds from `i("spazi  e altro ")`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"spazi  e altro "`
-multiplicity: 1
-TODO: parse cmds from `3r`
-multiplicity: 3
-name: `r` => type: 7
-multiplicity: 1
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(palle`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse cmds from `date i(" (today)")`
-multiplicity: 1
-name: `date` => type: 11
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `" (today`
-multiplicity: 1
-TODO: parse cmds from `i(ciao)`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `ciao`
-multiplicity: 1
-TODO: parse cmds from `i("ciao,caro") `
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-multiplicity: 1
-TODO: parse cmds from `i("spazi  e altro ")`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"spazi  e altro "`
-multiplicity: 1
-TODO: parse cmds from `3r`
-multiplicity: 3
-name: `r` => type: 7
-multiplicity: 1
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(palle`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse cmds from `i(ciao)`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `ciao`
-multiplicity: 1
-TODO: parse cmds from `i("ciao,caro") `
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-multiplicity: 1
-TODO: parse cmds from `i("spazi  e altro ")`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"spazi  e altro "`
-multiplicity: 1
-TODO: parse cmds from `3r`
-multiplicity: 3
-name: `r` => type: 7
-multiplicity: 1
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -156,21 +17,17 @@ TODO: parse cmds from `i(ciao)`
 multiplicity: 1
 name: `i` => type: 10
 TODO: parse arguments `ciao`
-multiplicity: 1
 TODO: parse cmds from `i("ciao,caro") `
 multiplicity: 1
 name: `i` => type: 10
 TODO: parse arguments `"ciao,caro"`
-multiplicity: 1
-TODO: parse cmds from `i("spazi  e altro ")`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"spazi  e altro "`
-multiplicity: 1
 TODO: parse cmds from `3r`
 multiplicity: 3
 name: `r` => type: 7
+TODO: parse cmds from `i()`
 multiplicity: 1
+name: `i` => type: 10
+TODO: parse arguments ``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -178,20 +35,32 @@ TODO: parse cmds from `i(ciao)`
 multiplicity: 1
 name: `i` => type: 10
 TODO: parse arguments `ciao`
-multiplicity: 1
 TODO: parse cmds from `i("ciao,caro") `
 multiplicity: 1
 name: `i` => type: 10
 TODO: parse arguments `"ciao,caro"`
-multiplicity: 1
-TODO: parse cmds from `i("spazi  e altro ")`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"spazi  e altro "`
-multiplicity: 1
 TODO: parse cmds from `3r`
 multiplicity: 3
 name: `r` => type: 7
+TODO: parse cmds from `i()`
 multiplicity: 1
+name: `i` => type: 10
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TODO: parse cmds from `i(ciao)`
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse arguments `ciao`
+TODO: parse cmds from `i("ciao,caro") `
+multiplicity: 1
+name: `i` => type: 10
+TODO: parse arguments `"ciao,caro"`
+TODO: parse cmds from `3r`
+multiplicity: 3
+name: `r` => type: 7
+TODO: parse cmds from `i()`
+multiplicity: 1
+name: `i` => type: 10
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

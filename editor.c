@@ -609,7 +609,7 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
     da_init(cmds, 2, DA_DEFAULT_FAC);
     size_t i = 0;
     size_t len = strlen(cmds_str);
-    while (i < len) {
+    while (i < len && strlen(cmds_str) > 0) {
         Command cmd = {0};
 
         if (isdigit(*cmds_str)) {
@@ -645,6 +645,14 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
             } else return error;
         } else log_this("name: `%s` => type: %d", cmds_str, cmd.type);
 
+        int index = get_command_index(&cmd);
+        if (index == -1) {
+            fprintf(stderr, "FATAL: unreachable command `%d`\n", cmd.type);
+            exit(1);
+        }
+        const Command *ref_cmd = &commands.items[index];
+        cmd.name = ref_cmd->name;
+
         size_t name_len = strlen(cmds_str);
         cmds_str += name_len + 1;
         if (loc) loc->col += name_len;
@@ -658,12 +666,28 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
             char *end_of_cmd_args = strchr(cmds_str, ')');
             if (end_of_cmd_args == NULL) return strdup("unclosed arguments parenthesis");
             else *end_of_cmd_args = '\0';
-            // TODO: parse arguments in parenthesis
-            if (loc) loc->col += 1 + trim_left(&cmds_str);
-            log_this("TODO: parse arguments `%s`", cmds_str);
+            if (loc) loc->col += trim_left(&cmds_str);
+            if (strlen(cmds_str) == 0) return strdup("no arguments provided");
+            if (loc) loc->col++;
+
+            // TODO: capisci come organizzare il ciclo
+            char *arg = cmds_str;
+            for (size_t j = 0; j < strlen(cmds_str); j++) {
+                if (cmds_str[j] == ',') { // TODO: next arg (check if arg len is > 0)
+                    size_t arglen = arg - cmds_str;
+                    log_this("TODO: parse argument `%s`", cmds_str);
+                    cmds_str += 1 + comma;
+                }
+                arg++;
+                j++;
+            }
+
+            if (loc) loc->col += strlen(cmds_str) + 1;
+            cmds_str = end_of_cmd_args + 1;
         }
 
-        // TODO: add cmd to cmds
+        da_push(cmds, cmd);
+        if (loc) loc->col += trim_left(&cmds_str);
     }
 
     return NULL;
