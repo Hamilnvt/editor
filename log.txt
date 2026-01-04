@@ -1,66 +1,30 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(ciao)`
+- Parsing cmds from `i(ciao)`
 multiplicity: 1
 name: `i` => type: 10
-TODO: parse arguments `ciao`
-TODO: parse cmds from `i("ciao,caro") `
+  > Parsing arguments `ciao)` (4)
+    - TODO: parse argument `ciao`
+- Parsing cmds from `i("ciao,caro") `
 multiplicity: 1
 name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-TODO: parse cmds from `3r`
+  > Parsing arguments `"ciao,caro") ` (11)
+    - TODO: parse argument `"ciao`
+    - TODO: parse argument `,caro"`
+- Parsing cmds from `3r`
 multiplicity: 3
 name: `r` => type: 7
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(ciao)`
+- Parsing cmds from `i()`
 multiplicity: 1
 name: `i` => type: 10
-TODO: parse arguments `ciao`
-TODO: parse cmds from `i("ciao,caro") `
+- Parsing cmds from `i(ciao, caro)`
 multiplicity: 1
 name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-TODO: parse cmds from `3r`
-multiplicity: 3
-name: `r` => type: 7
-TODO: parse cmds from `i()`
+  > Parsing arguments `ciao, caro)` (10)
+    - TODO: parse argument `ciao`
+    - TODO: parse argument `, caro`
+- Parsing cmds from `i(,  ,  ,)`
 multiplicity: 1
 name: `i` => type: 10
-TODO: parse arguments ``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(ciao)`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `ciao`
-TODO: parse cmds from `i("ciao,caro") `
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-TODO: parse cmds from `3r`
-multiplicity: 3
-name: `r` => type: 7
-TODO: parse cmds from `i()`
-multiplicity: 1
-name: `i` => type: 10
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TODO: parse cmds from `i(ciao)`
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `ciao`
-TODO: parse cmds from `i("ciao,caro") `
-multiplicity: 1
-name: `i` => type: 10
-TODO: parse arguments `"ciao,caro"`
-TODO: parse cmds from `3r`
-multiplicity: 3
-name: `r` => type: 7
-TODO: parse cmds from `i()`
-multiplicity: 1
-name: `i` => type: 10
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
+  > Parsing arguments `,  ,  ,)` (7)
+siamo qui?
+siamo qui?
