@@ -1,40 +1,5 @@
 // Reference: https://viewsourcecode.org/snaptoken/kilo/index.html
 
-/* TODO:
-    - commands_history_cap (config?)
-    - capire come leggere ctrl-shift-x
-    - comando per spostarsi ad una riga precisa
-    - comando che stampa l'elenco dei comandi (builtin + user defined)
-    - config:
-      > aggiungere una descrizione ai campi da mostrare in caso di errore/assenza del campo
-        - si genera nel config file di default e poi si mostra lo stesso errore, quindi deve stare da qualche parte
-      > sintassi dei comandi user defined
-        - serve un terminatore del comando? (ad esempio ';')
-        - forse e' meglio che gli argomenti vengano passati tra parentesi
-            ad esempio => #cmd: c1(arg1, arg2) c2 c3(nome="palle sudate")
-        - gestione degli argomenti dei comandi definiti dall'utente, magari $0 oppure {0}
-            > esempio 1. #cmd: ciao sono {} il {} => `cmd(tanica,tastiere)`
-            > esempio 2. #cmd: daje({0}) => `cmd(roma)`
-            > esempio 3. #cmd: ciao({nome}) come stai => `cmd(mario)` oppure `cmd(nome=mario)`
-            > esempio 4. #cmd: ciao({nome=Tanica}) come stai => `cmd` == `cmd.Tanica`
-      > possibilita' di assegnare comandi a combinazioni di tasti (questo sembra essere molto difficile, non ho idea di come si possa fare)
-    - autocompletion dei comandi, con TAB vai all'argomento successivo
-    - sistema di registrazione macro (comandi temporanei a cui magari si puo' dare un nome e le si esegue come comandi o con shortcut)
-        > possibilita' di salvarli come comandi aggiungendoli direttamente al config
-    - funzioni separate per la modifica della command line (altrimenti non si capisce niente)
-      > cambiare anche process_pressed_key in modo da prendere solo gli input che valgono anche per il comando (altrimenti dovrei controllare in ogni funzione se si e' in_cmd e poi fare return
-    - gestire con max_int o come si chiama il limite di editor.N
-    - undo: undo dei comandi o versioni diverse delle variabili globali? Probabilmente la prima
-    - emacs snippet thing (non ricordo il nome del package)
-        > ifTAB => if (COND) {\n BODY \n}
-        > con TAB ulteriori vai avanti nei vari blocchi
-        > sintassi?
-    - comando set(config_var, value)
-    - forse per i comandi non servono i da: una volta che so la dimensione alloco la dimensione giusta e salvo il numero di argomenti e subcmds all'interno del comando
-    - array di Window, si itera su questo array e chiama una funzione di callback (campo di Window)
-
-*/
-
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -82,7 +47,7 @@ typedef struct
 {
     char *filename;
     Rows rows;
-    int dirty; // TODO: quando si esegue un'azione che modifica lo editor si fa una copia (o comunque si copia parte dell'editor) che si inserisce in una struttura dati che permette di ciclare sulle varie 'versioni' dell'editor. dirty tiene conto di quale editor si sta guardando e quante modifiche sono state (fatte ciao miao gattin batifl)
+    int dirty;
 
     size_t cx;
     size_t cy;
@@ -117,7 +82,7 @@ static Editor editor = {0};
 #define CURRENT_LINE LINE(CURRENT_Y_POS)
 #define CHAR(row, i) (LINE(row)[i])
 #define CURRENT_CHAR CHAR(CURRENT_Y_POS, CURRENT_X_POS)
-#define N_PAGES (editor.rows.count/editor.screen_rows + 1)
+#define N_PAGES (editor.rows.count/win_main.height + 1)
 
 /* ANSI escape sequences */
 #define ANSI_GO_HOME_CURSOR "\x1B[H"
@@ -148,12 +113,12 @@ typedef enum
     CTRL_K    = 11,
     CTRL_L    = 12,
     ENTER     = 13,
+    CTRL_M    = 13,
     CTRL_N    = 14,
     CTRL_P    = 16,
     CTRL_Q    = 17,
     CTRL_S    = 19,
     ESC       = 27,
-    BACKSPACE = 127,
 
     ALT_0     = 1000,
     ALT_1,
@@ -167,18 +132,45 @@ typedef enum
     ALT_9, // NOTE: ALT_digit sequences must be consecutive
 
     ALT_k,
-    ALT_K,
     ALT_j,
-    ALT_J,
     ALT_h,
-    ALT_H,
     ALT_l,
+
+    ALT_K,
+    ALT_J,
+    ALT_H,
     ALT_L,
     ALT_M,
+
+    // TODO
+    //CTRL_ALT_k,
+    //CTRL_ALT_j,
+    //CTRL_ALT_h,
+    //CTRL_ALT_l,
+
+    //CTRL_ALT_K,
+    //CTRL_ALT_J,
+    //CTRL_ALT_H,
+    //CTRL_ALT_L,
 
     ALT_BACKSPACE,
     ALT_COLON,
 } Key;
+
+typedef struct
+{
+    WINDOW *win;
+    size_t height;
+    size_t width;
+    size_t start_y;
+    size_t start_x;
+} Window;
+
+static Window win_main = {0};
+static Window win_line_numbers = {0};
+static Window win_message = {0};
+static Window win_command = {0};
+static Window win_status = {0};
 
 _Noreturn void print_error_and_exit(const char *fmt, ...)
 {
@@ -217,21 +209,22 @@ void enqueue_message(const char *fmt, ...)
     va_list ap;
     va_start(ap, fmt);
     char buf[1024] = {0};
-    vsnprintf(buf, editor.screen_cols, fmt, ap); // TODO: si puo' anche togliere la limitazione di 1024,
+    vsnprintf(buf, win_message.width, fmt, ap);  // TODO: si puo' anche togliere la limitazione di 1024,
                                                  // tanto ora posso creare una finestra grande a piacere
                                                  // (ovviamente non oltre le dimensioni del terminale, per ora)
     da_push(&editor.messages, strdup(buf)); // NOTE: rember to free
     va_end(ap);
 }
 
-char *next_message()
+static inline bool are_there_pending_messages(void) { return !da_is_empty(&editor.messages); }
+
+void next_message(void)
 {
-    if (da_is_empty(&editor.messages)) return NULL;
+    if (!are_there_pending_messages()) return;
     char *msg = editor.messages.items[0];
     da_remove_first(&editor.messages);
     free(msg);
     editor.current_msg_time = time(NULL);
-    return da_is_empty(&editor.messages) ? NULL : editor.messages.items[0];
 }
 
 /// BEGIN Commands
@@ -279,7 +272,6 @@ typedef enum
     ARG_STRING
 } CommandArgType;
 
-// TODO: aggiungere name in modo da poterli chiamare con quel nome
 typedef struct
 {
     void *value;
@@ -332,8 +324,6 @@ void commands_history_add(char *cmd)
     commands_history.index = -1;
 }
 
-// TODO: se stai scrivendo un comando e fai previous ti salva quello che stavi scrivendo
-// - magari solo come temporaneo, senza effettivamente aggiungerlo alla storia
 void commands_history_previous()
 {
     if (!editor.in_cmd) return;
@@ -368,7 +358,6 @@ bool expect_n_arguments(const Command *cmd, size_t n)
     if (cmd->args.count == n) return true;
 
     enqueue_message("ERROR: command `%s` expects %zu argument%s, but got %zu", cmd->name, n, n == 1 ? "" : "s", cmd->args.count);
-    // TODO: mostrare anche quali sono i tipi e i nomi degli argomenti
     return false;
 }
 
@@ -458,12 +447,6 @@ typedef struct
     size_t col;
 } Location;
 
-//TODO:
-// - dovrei probabilmente non usare strtok e fare tutto a mano
-//   > funzioni come trim (left/right) sarebbero utili anche altrove tanto e poi ho String che e' molto utile
-//   > questo mi aiuterebbe a parsare anche le nuove cose che voglio implementare (argomenti numerati e nominali)
-// - track location
-// - si puo' fare che se c'e' un errore continua a parsare e lo segnala solo (ritorna un da di errori)
 char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
 {
     *cmds = (Commands){0};
@@ -1127,7 +1110,6 @@ void load_config()
         }
     }
 
-    // TODO: magari se si lancia l'editor con -v stampa anche queste cose
     //s_push_fstr(&config_log, "\nDefined commands:\n");
     //for (size_t i = 0; i < commands.count; i++) {
     //    s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", commands.items[i].name);
@@ -1152,28 +1134,25 @@ void load_config()
 /// END Config 
 
 /* Pairs */
-#define DEFAULT_EDITOR_PAIR  0
-#define DEFAULT_STATUS_PAIR  1
-#define DEFAULT_MESSAGE_PAIR 2
+typedef enum
+{
+    DEFAULT_EDITOR_PAIR = 0,
+    DEFAULT_EDITOR_PAIR_INV,
+    DEFAULT_STATUS_PAIR,
+    DEFAULT_MESSAGE_PAIR
+} EditorPair;
 
 /* Windows */
-typedef struct
-{
-    WINDOW *win;
-} Window;
-
-static Window win_main = {0};
-static Window win_line_numbers = {0};
-static Window win_message = {0};
-static Window win_command = {0};
-static Window win_status = {0};
-
 static inline void get_screen_size(void) { getmaxyx(stdscr, editor.screen_rows, editor.screen_cols); }
 
 Window create_window(int h, int w, int y, int x, int pair)
 {
     Window win = {0};
     win.win = newwin(h, w, y, x);
+    win.height = h;
+    win.width = w;
+    win.start_y = y;
+    win.start_x = x;
     wattron(win.win, COLOR_PAIR(pair));
     return win;
 }
@@ -1183,11 +1162,18 @@ void create_windows(void)
     win_main = create_window(editor.screen_rows-1, editor.screen_cols-LINE_NUMBERS_SPACE, 0, LINE_NUMBERS_SPACE,
             DEFAULT_EDITOR_PAIR);
     win_line_numbers = create_window(editor.screen_rows-1, LINE_NUMBERS_SPACE, 0, 0, DEFAULT_EDITOR_PAIR);
-    win_message = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_MESSAGE_PAIR);
+    win_message      = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_EDITOR_PAIR_INV);
+    win_command      = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_EDITOR_PAIR_INV);
+    win_status       = create_window(1, editor.screen_cols, editor.screen_rows-1, 0, DEFAULT_EDITOR_PAIR);
+}
 
-    win_command = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_MESSAGE_PAIR);
-
-    win_status = create_window(1, editor.screen_cols, editor.screen_rows-1, 0, DEFAULT_EDITOR_PAIR);
+void destroy_windows(void)
+{
+    delwin(win_main.win);
+    delwin(win_line_numbers.win);
+    delwin(win_message.win);
+    delwin(win_command.win);
+    delwin(win_status.win);
 }
 
 void ncurses_end(void)
@@ -1208,18 +1194,20 @@ void ncurses_init(void)
     set_escdelay(25);
     keypad(stdscr, TRUE);
 
+    // TODO: fix damn colors
     if (has_colors()) {
-        start_color();
+        //start_color();
 
         init_color(ED_COLOR_DEFAULT_BACKGROUND, 18, 18, 18);
         init_color(ED_COLOR_DEFAULT_FOREGROUND, 5, 20, 5);
         init_color(ED_COLOR_YELLOW, 178, 181, 0);
 
         init_pair(DEFAULT_EDITOR_PAIR, ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_DEFAULT_BACKGROUND);
+        init_pair(DEFAULT_EDITOR_PAIR_INV, ED_COLOR_DEFAULT_BACKGROUND, ED_COLOR_DEFAULT_FOREGROUND);
         init_pair(DEFAULT_MESSAGE_PAIR, COLOR_WHITE, COLOR_RED);
         //init_pair(DEFAULT_STATUS_PAIR, ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_DEFAULT_BACKGROUND);
 
-        use_default_colors();
+        //use_default_colors();
     }
 
     atexit(ncurses_end);
@@ -1323,7 +1311,7 @@ bool get_window_size(size_t *rows, size_t *cols)
 
 void update_window_main(void)
 {
-    for (size_t i = editor.offset; i < editor.offset+editor.screen_rows; i++) {
+    for (size_t i = editor.offset; i < editor.offset+win_main.height; i++) {
         if (i >= editor.rows.count) {
             wprintw(win_main.win, "~\n");
             continue;
@@ -1335,19 +1323,28 @@ void update_window_main(void)
 
 void update_window_line_numbers(void)
 {
-    for (size_t i = 0; i < editor.screen_rows; i++) {
+    for (size_t i = 0; i < win_line_numbers.height; i++) {
         wprintw(win_line_numbers.win, "%zu\n", i+1);
     }
 }
 
+// TODO: non funziona
 void update_window_message(void)
 {
-    wprintw(win_message.win, "TODO: message\n");
+    if (editor.in_cmd || !are_there_pending_messages()) return;
+
+    if (time(NULL)-editor.current_msg_time > config.msg_lifetime)
+        next_message();
+
+    if (!are_there_pending_messages()) return;
+
+    wprintw(win_message.win, editor.messages.items[0]);
 }
 
 void update_window_command(void)
 {
-
+    wprintw(win_command.win, "Command: ");
+    wprintw(win_command.win, S_FMT, S_ARG(editor.cmd));
 }
 
 void update_window_status(void)
@@ -1359,8 +1356,7 @@ void update_window_status(void)
     else if (CURRENT_Y_POS > editor.rows.count-1)  strcpy(perc_buf, "Over");
     else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
 
-    // TODO: attention, it could overflow
-    waddch(win_status.win, ' ');
+    // WARN: it could overflow
     waddstr(win_status.win, editor.filename);
     waddch(win_status.win, ' ');
     wprintw(win_status.win, "%c", editor.dirty ? '+' : '-');
@@ -1387,12 +1383,12 @@ void update_windows(void)
 {
     update_window(main);
     update_window(line_numbers);
-    update_window(message);
-    update_window(command);
+    if (editor.in_cmd) update_window(command);
+    else if (are_there_pending_messages()) update_window(message);
     update_window(status);
 
     //Row *row;
-    //for (size_t y = editor.offset; y < editor.offset+editor.screen_rows; y++) {
+    //for (size_t y = editor.offset; y < editor.offset+win_main.height; y++) {
     //    // TODO: si puo' fattorizzare la funzione che aggiunge gli spazi per keep_cursor
     //    bool is_current_line = y == editor.cy-editor.offset;
 
@@ -1559,22 +1555,27 @@ void update_cursor(void)
 {
     size_t cy = editor.cy;
     size_t cx = editor.cx;
+    WINDOW *win = win_main.win;
 
     if (editor.in_cmd) {
-        cy = editor.screen_rows-1;
+        cy = win_command.start_y;
         cx = strlen("Command: ") + editor.cmd_pos;
+        win = win_command.win;
     }
 
-    wmove(win_main.win, cy, cx);
-    wnoutrefresh(win_main.win);
+    wmove(win, cy, cx);
+    wnoutrefresh(win);
 }
 
 void handle_sigwinch(int signo)
 {
     (void)signo;
     get_screen_size();
-    if (editor.cy > editor.screen_rows) editor.cy = editor.screen_rows - 1;
-    if (editor.cx > editor.screen_cols) editor.cx = editor.screen_cols - 1;
+    destroy_windows();
+    create_windows();
+    
+    if (editor.cy >= win_main.height) editor.cy = win_main.height - 1;
+    if (editor.cx >= win_main.width) editor.cx = win_main.width - 1;
 }
 
 void editor_init()
@@ -1627,22 +1628,22 @@ bool open_file(char *filename)
 void builtin_move_cursor_up() 
 {
     if (editor.cy == 0 && editor.page != 0) {
-        editor.offset--; // TODO: deve cambiare anche la pagina
+        editor.offset--;
+        // TODO: deve cambiare anche la pagina, ma come?
     }
     if (editor.cy - N_OR_DEFAULT(1) > 0) editor.cy -= N_OR_DEFAULT(1);
     else editor.cy = 0;
-    //if (editor.offset > N_OR_DEFAULT(0)) editor.offset -= N_OR_DEFAULT(1);
-    //else editor.offset = 0;
 }
 
 void builtin_move_cursor_down()
 { 
     //if ((editor.offset+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.offset+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'offset in questo caso
-    if (editor.cy == editor.screen_rows-1 && editor.page != N_PAGES-1) {
-        editor.offset++; // TODO: deve cambiare anche la pagina
+    if (editor.cy == win_main.height-1 && editor.page != N_PAGES-1) {
+        editor.offset++;
+        // TODO: deve cambiare anche la pagina, ma come?
     }
-    if (editor.cy+N_OR_DEFAULT(1) < editor.screen_rows-1) editor.cy += N_OR_DEFAULT(1);
-    else editor.cy = editor.screen_rows-1;
+    if (editor.cy+N_OR_DEFAULT(1) < win_main.height-1) editor.cy += N_OR_DEFAULT(1);
+    else editor.cy = win_main.height-1;
     //if (editor.offset < editor.rows.count-N_OR_DEFAULT(0)-1) editor.offset += N_OR_DEFAULT(1); 
     //else editor.offset = editor.rows.count-1;
 }
@@ -1664,8 +1665,8 @@ void builtin_move_cursor_right()
         if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos += 1;
         else editor.cmd_pos = editor.cmd.count;
     } else {
-        if (editor.cx < editor.screen_cols-1) editor.cx += 1;
-        else editor.cx = editor.screen_cols-1;
+        if (editor.cx < win_main.width-1) editor.cx += 1;
+        else editor.cx = win_main.width-1;
     }
 }
 
@@ -1689,19 +1690,19 @@ void move_page_up() // TODO: non funziona benissimo
 {
     if (editor.page > N_OR_DEFAULT(0)) editor.page -= N_OR_DEFAULT(1);
     else editor.page = 0;
-    editor.offset = editor.page*editor.screen_rows + editor.cy;
+    editor.offset = editor.page*win_main.height + editor.cy;
 }             
 
 void move_page_down() // TODO: non funziona benissimo
 {
     if (editor.page < N_PAGES-N_OR_DEFAULT(0)-1) editor.page += N_OR_DEFAULT(1);
     else editor.page = N_PAGES-1;
-    editor.offset = editor.page*editor.screen_rows + editor.cy;
+    editor.offset = editor.page*win_main.height + editor.cy;
 }           
 
 static inline void move_cursor_begin_of_screen() { editor.cy = 0; }
 
-static inline void move_cursor_end_of_screen() { editor.cy = editor.screen_rows-1; }
+static inline void move_cursor_end_of_screen() { editor.cy = win_main.height-1; }
 
 void move_cursor_begin_of_file()
 {
@@ -1713,18 +1714,13 @@ void move_cursor_begin_of_file()
 void move_cursor_end_of_file() 
 {
     editor.page = N_PAGES-1;
-    editor.offset = editor.rows.count-editor.screen_rows;
-    editor.cy = editor.screen_rows-1;
+    editor.offset = editor.rows.count-win_main.height;
+    editor.cy = win_main.height-1;
 }
 
 static inline void move_cursor_begin_of_line() { editor.cx = 0; }
+static inline void move_cursor_end_of_line() { editor.cx = win_main.width-1; }
 
-void move_cursor_end_of_line()
-{
-    editor.cx = editor.screen_cols-1;
-}
-
-// TODO: ricontrolla
 void move_cursor_first_non_space()
 {
     size_t count = CURRENT_ROW->content.count;
@@ -1732,25 +1728,21 @@ void move_cursor_first_non_space()
     log_this("`"S_FMT"` (%zu)\n", S_ARG(CURRENT_ROW->content), count);
     if (count == 0) return;
     editor.cx = 0;
-    while (editor.cx < count && isspace(CURRENT_CHAR)) {
+    while (editor.cx < count && isspace(CURRENT_CHAR))
         editor.cx++;
-    }
 }
 
-// TODO: ricontrolla
 void move_cursor_last_non_space()
 {
-    Row *row = CURRENT_ROW;
-    char *str = row->content.items;
-    size_t count = row->content.count;
+    size_t count = CURRENT_ROW->content.count;
     if (count == 0) {
         editor.cx = 0;
         return;
     }
-    size_t i = count - 1;
-    while (i > 0 && isspace(str[i]))
-        i--;
-    editor.cx = (i == editor.screen_cols-1) ? i : i+1;
+    editor.cx = count - 1;
+    while (editor.cx > 0 && isspace(CURRENT_CHAR))
+        editor.cx--;
+    if (editor.cx != win_main.width-1) editor.cx++;
 }
 
 void itoa(int n, char *buf)
@@ -1843,7 +1835,7 @@ void builtin_move_line_up()
 void builtin_move_line_down()
 {
     size_t y = CURRENT_Y_POS;
-    if (y == editor.screen_rows-1) return;
+    if (y == win_main.height-1) return;
     Row tmp = editor.rows.items[y];
     editor.rows.items[y] = editor.rows.items[y+1];
     editor.rows.items[y+1] = tmp;
@@ -1910,7 +1902,7 @@ void insert_char(char c)
                 row->content.count = x;
             }
         }
-        if (editor.cy == editor.screen_rows-1) editor.offset++;
+        if (editor.cy == win_main.height-1) editor.offset++;
         else editor.cy++;
         editor.cx = 0;
     } else {
@@ -2033,8 +2025,8 @@ void delete_char()
         if (editor.cy == 0) editor.offset--;
         else editor.cy--;
         editor.cx = x;
-        if (editor.cx >= editor.screen_cols) {
-            int shift = (editor.screen_cols-editor.cx)+1;
+        if (editor.cx >= win_main.width) {
+            int shift = (win_main.width-editor.cx)+1;
             editor.cx -= shift;
         }
     } else {
