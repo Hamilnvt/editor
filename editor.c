@@ -101,7 +101,7 @@ typedef struct
 
     size_t current_quit_times;
 
-    int N; /* multiplicity for the command */
+    int N; // multiplicity for the commands
 } Editor;
 static Editor editor = {0};
 
@@ -112,10 +112,12 @@ static Editor editor = {0};
 #define LINE_NUMBERS_SPACE (config.line_numbers == LN_NO ? 0 : (size_t)log10(editor.rows.count)+3)
 #define CURRENT_Y_POS (editor.offset+editor.cy)
 #define CURRENT_X_POS (editor.cx)
-#define ROW(i) (&editor.rows.items[i])
-#define CHAR(row, i) (ROW(row)->content.items[i])
+#define ROW(i) (assert((i) <= editor.rows.count), &editor.rows.items[i])
 #define CURRENT_ROW ROW(CURRENT_Y_POS)
-#define CURRENT_CHAR CHAR(CURRENT_X_POS)
+#define LINE(i) (ROW(i)->content.items)
+#define CURRENT_LINE LINE(CURRENT_Y_POS)
+#define CHAR(row, i) (LINE(row)[i])
+#define CURRENT_CHAR CHAR(CURRENT_Y_POS, CURRENT_X_POS)
 #define N_PAGES (editor.rows.count/editor.screen_rows + 1)
 
 /* ANSI escape sequences */
@@ -1190,7 +1192,7 @@ void create_windows(void)
     win_command = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_MESSAGE_PAIR);
     win_command.needs_redraw = false;
 
-    win_status = create_window(1, editor.screen_cols, editor.screen_rows-1, 0, DEFAULT_STATUS_PAIR);
+    win_status = create_window(1, editor.screen_cols, editor.screen_rows-1, 0, DEFAULT_EDITOR_PAIR);
 }
 
 void ncurses_end(void)
@@ -1220,7 +1222,7 @@ void ncurses_init(void)
 
         init_pair(DEFAULT_EDITOR_PAIR, ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_DEFAULT_BACKGROUND);
         init_pair(DEFAULT_MESSAGE_PAIR, COLOR_WHITE, COLOR_RED);
-        init_pair(DEFAULT_STATUS_PAIR, COLOR_WHITE, COLOR_BLUE);
+        //init_pair(DEFAULT_STATUS_PAIR, ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_DEFAULT_BACKGROUND);
 
         use_default_colors();
     }
@@ -1335,11 +1337,11 @@ void update_windows(void)
                 continue;
             }
             Row *row = ROW(i);
-            if (row && row->content.items) wprintw(win_main.win, S_FMT"\n", S_ARG(row->content));
+            wprintw(win_main.win, S_FMT"\n", S_ARG(row->content));
         }
 
         win_main.needs_redraw = false;
-        wrefresh(win_main.win);
+        wnoutrefresh(win_main.win);
     }
 
     if (win_line_numbers.needs_redraw) {
@@ -1350,7 +1352,7 @@ void update_windows(void)
         }
 
         win_line_numbers.needs_redraw = false;
-        wrefresh(win_line_numbers.win);
+        wnoutrefresh(win_line_numbers.win);
     }
 
     if (win_message.needs_redraw) {
@@ -1359,24 +1361,47 @@ void update_windows(void)
         wprintw(win_message.win, "TODO: message\n");
 
         win_message.needs_redraw = false;
-        wrefresh(win_message.win);
+        wnoutrefresh(win_message.win);
     }
 
     if (win_command.needs_redraw) {
         wclear(win_command.win);
 
         win_command.needs_redraw = false;
-        wrefresh(win_command.win);
+        wnoutrefresh(win_command.win);
     }
 
     if (win_status.needs_redraw) {
         wclear(win_status.win);
 
-        wprintw(win_status.win, "TODO: status\n");
+        char perc_buf[5] = {0};
+        if (editor.rows.count == 0) strcpy(perc_buf, "0%");
+        else if (CURRENT_Y_POS == 0) strcpy(perc_buf, "Top");
+        else if (CURRENT_Y_POS == editor.rows.count-1) strcpy(perc_buf, "Bot");
+        else if (CURRENT_Y_POS > editor.rows.count-1)  strcpy(perc_buf, "Over");
+        else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
+
+        // TODO: attention, it could overflow
+        waddch(win_status.win, ' ');
+        waddstr(win_status.win, editor.filename);
+        waddch(win_status.win, ' ');
+        wprintw(win_status.win, "%c", editor.dirty ? '+' : '-');
+        waddch(win_status.win, ' ');
+        wprintw(win_status.win, "(%zu, %zu)", CURRENT_X_POS+1, CURRENT_Y_POS+1);
+        wprintw(win_status.win, " | ");
+        wprintw(win_status.win, "%zu lines", editor.rows.count); // TODO: singular/plural
+        waddch(win_status.win, ' ');
+        wprintw(win_status.win, "(%s)", perc_buf);
+        wprintw(win_status.win, " | ");
+        wprintw(win_status.win, "page %zu/%zu", editor.page+1, N_PAGES);
+        wprintw(win_status.win, " | ");
+        if (editor.N != N_DEFAULT) wprintw(win_status.win, "%d", editor.N);
 
         win_status.needs_redraw = false;
-        wrefresh(win_status.win);
+        wnoutrefresh(win_status.win);
     }
+
+    doupdate();
 
     //Row *row;
     //for (size_t y = editor.offset; y < editor.offset+editor.screen_rows; y++) {
@@ -1586,8 +1611,6 @@ bool open_file(char *filename)
         return true;
     }
 
-    FILE *file = fopen(filename, "r");
-
     if (strchr(filename, '/')) {
         char *tmp = filename + strlen(filename) - 1;
         while (*tmp != '/') tmp--;
@@ -1595,17 +1618,20 @@ bool open_file(char *filename)
     }
     editor.filename = strdup(filename);
 
+    FILE *file = fopen(filename, "r");
     if (file == NULL) return false;
 
     ssize_t res; 
     size_t len;
     char *line = NULL;
-    while ((res = getline(&line, &len, file)) != EOF) {
+    errno = 0;
+    while ((res = getline(&line, &len, file)) != -1) {
         Row row = {0};
-        s_push_str(&row.content, line, strlen(line)-1);
+        s_push_str(&row.content, line, res-1);
         da_push(&editor.rows, row);
     }
     free(line);
+    if (errno) return false;
     editor.cx = 0;
     return true;
 }
@@ -1617,7 +1643,7 @@ void builtin_move_cursor_up()
         needs_redraw(&win_line_numbers);
         needs_redraw(&win_main);
     }
-    if (editor.cy > 0) editor.cy -= N_OR_DEFAULT(1);
+    if (editor.cy - N_OR_DEFAULT(1) > 0) editor.cy -= N_OR_DEFAULT(1);
     else editor.cy = 0;
     //if (editor.offset > N_OR_DEFAULT(0)) editor.offset -= N_OR_DEFAULT(1);
     //else editor.offset = 0;
@@ -1631,7 +1657,7 @@ void builtin_move_cursor_down()
         needs_redraw(&win_main);
         needs_redraw(&win_line_numbers);
     }
-    if (editor.cy < editor.screen_rows-1) editor.cy += N_OR_DEFAULT(1);
+    if (editor.cy+N_OR_DEFAULT(1) < editor.screen_rows-1) editor.cy += N_OR_DEFAULT(1);
     else editor.cy = editor.screen_rows-1;
     //if (editor.offset < editor.rows.count-N_OR_DEFAULT(0)-1) editor.offset += N_OR_DEFAULT(1); 
     //else editor.offset = editor.rows.count-1;
@@ -1717,12 +1743,12 @@ void move_cursor_end_of_line()
 // TODO: ricontrolla
 void move_cursor_first_non_space()
 {
-    Row *row = CURRENT_ROW;
-    char *str = row->content.items;
-    size_t count = row->content.count;
+    size_t count = CURRENT_ROW->content.count;
+    log_this("cy = %zu", CURRENT_Y_POS);
+    log_this("`"S_FMT"` (%zu)\n", S_ARG(CURRENT_ROW->content), count);
     if (count == 0) return;
     editor.cx = 0;
-    while (editor.cx <= count && isspace(str[editor.cx])) {
+    while (editor.cx < count && isspace(CURRENT_CHAR)) {
         editor.cx++;
     }
 }
@@ -2078,11 +2104,25 @@ void delete_word()
     needs_redraw(&win_main);
 }
 
+bool set_N(int key)
+{
+    needs_redraw(&win_status);
+    int digit = key - ALT_0;
+    if (editor.N == N_DEFAULT) {
+        if (digit == 0) return false;
+        else editor.N = digit;
+    } else {
+        editor.N *= 10;
+        editor.N += digit;
+    }
+    log_this("new N: %d\n", editor.N);
+    return true;
+}
+
 void process_pressed_key(void)
 {
     int key = read_key();
     if (key == ERR) return;
-    log_this("Key = %d\n", key);
 
     bool has_inserted_number = false;
 
@@ -2097,18 +2137,8 @@ void process_pressed_key(void)
         case ALT_6:
         case ALT_7:
         case ALT_8:
-        case ALT_9: // TODO: factorize into function
-            int digit = key - ALT_0;
-            if (editor.N == N_DEFAULT) {
-                if (digit == 0) break;
-                else editor.N = digit;
-            } else {
-                editor.N *= 10;
-                editor.N += digit;
-            }
-            char bufN[64] = {0};
-            itoa(editor.N, bufN);
-            has_inserted_number = true;
+        case ALT_9:
+            if (set_N(key)) has_inserted_number = true;
             break;
 
         case ALT_k: N_TIMES builtin_move_cursor_up();    break;
@@ -2221,7 +2251,8 @@ int main(int argc, char **argv)
     create_windows();
 
     if (!open_file(filename)) {
-        print_error_and_exit("Could not open %sfile %s\n", filename ? "" : "new ", filename ? filename : "");
+        if (filename) print_error_and_exit("Could not open file `%s`. %s.\n", filename, errno ? strerror(errno) : "");
+        else          print_error_and_exit("Could not open new file. %s.\n", errno ? strerror(errno) : "");
     }
 
     while (true) {
