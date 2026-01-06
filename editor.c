@@ -2,7 +2,6 @@
 
 /* TODO:
     - commands_history_cap (config?)
-    - needs_redraw technology
     - capire come leggere ctrl-shift-x
     - comando per spostarsi ad una riga precisa
     - comando che stampa l'elenco dei comandi (builtin + user defined)
@@ -32,7 +31,7 @@
         > sintassi?
     - comando set(config_var, value)
     - forse per i comandi non servono i da: una volta che so la dimensione alloco la dimensione giusta e salvo il numero di argomenti e subcmds all'interno del comando
-    - array di Window, si itera su questo array e se needs_redraw si chiama una funzione di callback (campo di Window)
+    - array di Window, si itera su questo array e chiama una funzione di callback (campo di Window)
 
 */
 
@@ -366,11 +365,11 @@ void commands_history_next()
 
 bool expect_n_arguments(const Command *cmd, size_t n)
 {
-    if (cmd->args.count != n) {
-        enqueue_message("ERROR: command `%s` expects %zu argument%s, but got %zu", cmd->name, n, n == 1 ? "" : "s", cmd->args.count);
-        // TODO: mostrare anche quali sono i tipi e i nomi degli argomenti
-        return false;
-    } else return true;
+    if (cmd->args.count == n) return true;
+
+    enqueue_message("ERROR: command `%s` expects %zu argument%s, but got %zu", cmd->name, n, n == 1 ? "" : "s", cmd->args.count);
+    // TODO: mostrare anche quali sono i tipi e i nomi degli argomenti
+    return false;
 }
 
 CommandType parse_cmdtype(char *type)
@@ -1161,7 +1160,6 @@ void load_config()
 typedef struct
 {
     WINDOW *win;
-    bool needs_redraw;
 } Window;
 
 static Window win_main = {0};
@@ -1171,13 +1169,11 @@ static Window win_command = {0};
 static Window win_status = {0};
 
 static inline void get_screen_size(void) { getmaxyx(stdscr, editor.screen_rows, editor.screen_cols); }
-static inline void needs_redraw(Window *win) { win->needs_redraw = true; }
 
 Window create_window(int h, int w, int y, int x, int pair)
 {
     Window win = {0};
     win.win = newwin(h, w, y, x);
-    win.needs_redraw = true;
     wattron(win.win, COLOR_PAIR(pair));
     return win;
 }
@@ -1190,7 +1186,6 @@ void create_windows(void)
     win_message = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_MESSAGE_PAIR);
 
     win_command = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_MESSAGE_PAIR);
-    win_command.needs_redraw = false;
 
     win_status = create_window(1, editor.screen_cols, editor.screen_rows-1, 0, DEFAULT_EDITOR_PAIR);
 }
@@ -1326,82 +1321,75 @@ bool get_window_size(size_t *rows, size_t *cols)
     return true;
 }
 
+void update_window_main(void)
+{
+    for (size_t i = editor.offset; i < editor.offset+editor.screen_rows; i++) {
+        if (i >= editor.rows.count) {
+            wprintw(win_main.win, "~\n");
+            continue;
+        }
+        Row *row = ROW(i);
+        wprintw(win_main.win, S_FMT"\n", S_ARG(row->content));
+    }
+}
+
+void update_window_line_numbers(void)
+{
+    for (size_t i = 0; i < editor.screen_rows; i++) {
+        wprintw(win_line_numbers.win, "%zu\n", i+1);
+    }
+}
+
+void update_window_message(void)
+{
+    wprintw(win_message.win, "TODO: message\n");
+}
+
+void update_window_command(void)
+{
+
+}
+
+void update_window_status(void)
+{
+    char perc_buf[5] = {0};
+    if (editor.rows.count == 0) strcpy(perc_buf, "0%");
+    else if (CURRENT_Y_POS == 0) strcpy(perc_buf, "Top");
+    else if (CURRENT_Y_POS == editor.rows.count-1) strcpy(perc_buf, "Bot");
+    else if (CURRENT_Y_POS > editor.rows.count-1)  strcpy(perc_buf, "Over");
+    else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
+
+    // TODO: attention, it could overflow
+    waddch(win_status.win, ' ');
+    waddstr(win_status.win, editor.filename);
+    waddch(win_status.win, ' ');
+    wprintw(win_status.win, "%c", editor.dirty ? '+' : '-');
+    waddch(win_status.win, ' ');
+    wprintw(win_status.win, "(%zu, %zu)", CURRENT_X_POS+1, CURRENT_Y_POS+1);
+    wprintw(win_status.win, " | ");
+    wprintw(win_status.win, "%zu lines", editor.rows.count); // TODO: singular/plural
+    waddch(win_status.win, ' ');
+    wprintw(win_status.win, "(%s)", perc_buf);
+    wprintw(win_status.win, " | ");
+    wprintw(win_status.win, "page %zu/%zu", editor.page+1, N_PAGES);
+    wprintw(win_status.win, " | ");
+    if (editor.N != N_DEFAULT) wprintw(win_status.win, "%d", editor.N);
+}
+
+#define update_window(window_name)           \
+    do {                                     \
+        werase(win_##window_name.win);       \
+        update_window_##window_name();       \
+        wnoutrefresh(win_##window_name.win); \
+    } while (0)
+
 void update_windows(void)
 {
-    if (win_main.needs_redraw) {
-        wclear(win_main.win);
-
-        for (size_t i = editor.offset; i < editor.offset+editor.screen_rows; i++) {
-            if (i >= editor.rows.count) {
-                wprintw(win_main.win, "~\n");
-                continue;
-            }
-            Row *row = ROW(i);
-            wprintw(win_main.win, S_FMT"\n", S_ARG(row->content));
-        }
-
-        win_main.needs_redraw = false;
-        wnoutrefresh(win_main.win);
-    }
-
-    if (win_line_numbers.needs_redraw) {
-        wclear(win_line_numbers.win);
-
-        for (size_t i = 0; i < editor.screen_rows; i++) {
-            wprintw(win_line_numbers.win, "%zu\n", i+1);
-        }
-
-        win_line_numbers.needs_redraw = false;
-        wnoutrefresh(win_line_numbers.win);
-    }
-
-    if (win_message.needs_redraw) {
-        wclear(win_message.win);
-
-        wprintw(win_message.win, "TODO: message\n");
-
-        win_message.needs_redraw = false;
-        wnoutrefresh(win_message.win);
-    }
-
-    if (win_command.needs_redraw) {
-        wclear(win_command.win);
-
-        win_command.needs_redraw = false;
-        wnoutrefresh(win_command.win);
-    }
-
-    if (win_status.needs_redraw) {
-        wclear(win_status.win);
-
-        char perc_buf[5] = {0};
-        if (editor.rows.count == 0) strcpy(perc_buf, "0%");
-        else if (CURRENT_Y_POS == 0) strcpy(perc_buf, "Top");
-        else if (CURRENT_Y_POS == editor.rows.count-1) strcpy(perc_buf, "Bot");
-        else if (CURRENT_Y_POS > editor.rows.count-1)  strcpy(perc_buf, "Over");
-        else sprintf(perc_buf, "%d%%", (int)(((float)(CURRENT_Y_POS)/(editor.rows.count))*100));
-
-        // TODO: attention, it could overflow
-        waddch(win_status.win, ' ');
-        waddstr(win_status.win, editor.filename);
-        waddch(win_status.win, ' ');
-        wprintw(win_status.win, "%c", editor.dirty ? '+' : '-');
-        waddch(win_status.win, ' ');
-        wprintw(win_status.win, "(%zu, %zu)", CURRENT_X_POS+1, CURRENT_Y_POS+1);
-        wprintw(win_status.win, " | ");
-        wprintw(win_status.win, "%zu lines", editor.rows.count); // TODO: singular/plural
-        waddch(win_status.win, ' ');
-        wprintw(win_status.win, "(%s)", perc_buf);
-        wprintw(win_status.win, " | ");
-        wprintw(win_status.win, "page %zu/%zu", editor.page+1, N_PAGES);
-        wprintw(win_status.win, " | ");
-        if (editor.N != N_DEFAULT) wprintw(win_status.win, "%d", editor.N);
-
-        win_status.needs_redraw = false;
-        wnoutrefresh(win_status.win);
-    }
-
-    doupdate();
+    update_window(main);
+    update_window(line_numbers);
+    update_window(message);
+    update_window(command);
+    update_window(status);
 
     //Row *row;
     //for (size_t y = editor.offset; y < editor.offset+editor.screen_rows; y++) {
@@ -1578,7 +1566,7 @@ void update_cursor(void)
     }
 
     wmove(win_main.win, cy, cx);
-    wrefresh(win_main.win);
+    wnoutrefresh(win_main.win);
 }
 
 void handle_sigwinch(int signo)
@@ -1640,8 +1628,6 @@ void builtin_move_cursor_up()
 {
     if (editor.cy == 0 && editor.page != 0) {
         editor.offset--; // TODO: deve cambiare anche la pagina
-        needs_redraw(&win_line_numbers);
-        needs_redraw(&win_main);
     }
     if (editor.cy - N_OR_DEFAULT(1) > 0) editor.cy -= N_OR_DEFAULT(1);
     else editor.cy = 0;
@@ -1654,8 +1640,6 @@ void builtin_move_cursor_down()
     //if ((editor.offset+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.offset+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'offset in questo caso
     if (editor.cy == editor.screen_rows-1 && editor.page != N_PAGES-1) {
         editor.offset++; // TODO: deve cambiare anche la pagina
-        needs_redraw(&win_main);
-        needs_redraw(&win_line_numbers);
     }
     if (editor.cy+N_OR_DEFAULT(1) < editor.screen_rows-1) editor.cy += N_OR_DEFAULT(1);
     else editor.cy = editor.screen_rows-1;
@@ -1902,7 +1886,6 @@ void insert_char(char c)
             da_insert(&editor.cmd, c, editor.cmd_pos);
             editor.cmd_pos++;
         }
-        needs_redraw(&win_command);
         return;
     }
 
@@ -1941,7 +1924,6 @@ void insert_char(char c)
         editor.cx++;
     }
     editor.dirty++;
-    needs_redraw(&win_main);
 }
 
 void builtin_insert(const Command *cmd)
@@ -2034,7 +2016,6 @@ void delete_char()
         if (editor.cmd_pos == 0) return;
         da_remove(&editor.cmd, editor.cmd_pos-1);
         editor.cmd_pos--;
-        needs_redraw(&win_command);
         return;
     }
 
@@ -2061,7 +2042,6 @@ void delete_char()
         if (editor.cx > 0) editor.cx--;
     }
     editor.dirty++;
-    needs_redraw(&win_main);
 }
 
 // TODO: non funziona
@@ -2079,7 +2059,6 @@ void delete_word()
                 editor.cmd_pos--;
             }
         }
-        needs_redraw(&win_command);
         return;
     }
 
@@ -2101,12 +2080,10 @@ void delete_word()
     }
     editor.cx = x;
     editor.dirty++;
-    needs_redraw(&win_main);
 }
 
 bool set_N(int key)
 {
-    needs_redraw(&win_status);
     int digit = key - ALT_0;
     if (editor.N == N_DEFAULT) {
         if (digit == 0) return false;
@@ -2259,6 +2236,7 @@ int main(int argc, char **argv)
         process_pressed_key();
         update_windows();
         update_cursor();
+        doupdate();
     }
 
     return 0;
