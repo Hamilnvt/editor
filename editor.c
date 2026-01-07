@@ -274,9 +274,13 @@ typedef enum
 
 typedef struct
 {
-    void *value;
     CommandArgType type;
-    bool needed;
+    union {
+        size_t uint_value;
+        char *string_value;
+    };
+    size_t index;
+    char *name;
 } CommandArg;
 
 typedef struct
@@ -286,19 +290,25 @@ typedef struct
     size_t capacity;
 } CommandArgs;
 
-typedef struct Command // TODO: forse cosi'
+typedef struct Command Command;
+
+typedef struct
+{
+    struct Command *items;
+    size_t count;
+    size_t capacity;
+} Commands;
+
+typedef struct
 {
     char *name;
     CommandType type;
     CommandArgs args;
-    struct Commands {
-        struct Command *items;
-        size_t count;
-        size_t capacity;
-    } subcmds;
+    CommandArgs baked_args;
+    Commands subcmds;
     size_t n;
+    void (*execute)(CommandArgs *args);
 } Command;
-typedef struct Commands Commands;
 
 static Commands commands = {0}; // NOTE: all commands are stored in here
 
@@ -602,6 +612,14 @@ void trim(char **str)
     trim_left(str);
     trim_right(*str);
 }
+
+/* Command grammar
+    CMD_DEF -> # cmd_name : CMD_LIST
+    CMD_LIST -> CMD CMD_LIST | epsilon
+    CMD -> n cmd_name ( ARG_LIST )
+    ARG -> arg_name = arg_value
+    ARG_LIST -> ARG ARG_LIST | epsilon
+*/
 
 #define NO_LOCATION NULL
 char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
@@ -1864,7 +1882,7 @@ void insert_char(char c)
                 cli_cmd.args = args;
                 execute_cmd(&cli_cmd);
             }
-            //free_commands(&cmds);
+            //free_commands(&cmds); // TODO
         } else {
             da_insert(&editor.cmd, c, editor.cmd_pos);
             editor.cmd_pos++;
@@ -1939,43 +1957,51 @@ void builtin_goto_line(const Command *cmd)
     enqueue_message("TODO: goto line %zu", line);
 }
 
-void execute_cmd(const Command *cmd)
+void execute_cmd(const Command *cmd, CommandArgs *runtime_args)
 {
-    log_this("Executing `%s`", cmd->name);
-    static_assert(BUILTIN_CMDS_COUNT == 13, "Execute all commands in execute_cmd");
-    for (size_t i = 0; i < cmd->n; i++ ) {
-        switch (cmd->type)
-        {
-            case BUILTIN_SAVE             : save();                      break;
-            case BUILTIN_QUIT             : if (can_quit()) quit();      break;
-            case BUILTIN_SAVE_AND_QUIT    : save(); quit();              break;
-            case BUILTIN_FORCE_QUIT       : quit();                      break;
-            case BUILTIN_MOVE_CURSOR_UP   : builtin_move_cursor_up();    break;
-            case BUILTIN_MOVE_CURSOR_DOWN : builtin_move_cursor_down();  break; 
-            case BUILTIN_MOVE_CURSOR_LEFT : builtin_move_cursor_left();  break;
-            case BUILTIN_MOVE_CURSOR_RIGHT: builtin_move_cursor_right(); break;
-            case BUILTIN_MOVE_LINE_UP     : builtin_move_line_up();      break;
-            case BUILTIN_MOVE_LINE_DOWN   : builtin_move_line_down();    break;
-            case BUILTIN_INSERT           : builtin_insert(cmd);         break;
-            case BUILTIN_DATE             : builtin_date();              break;
-            case BUILTIN_GOTO_LINE        : builtin_goto_line(cmd);      break;
-            case UNKNOWN: enqueue_message("Unknown command `%s`", cmd->name); break;
-            case BUILTIN_CMDS_COUNT:
-                print_error_and_exit("Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
-            case CLI:
-                da_foreach(cmd->subcmds, Command, subcmd)
-                    execute_cmd(subcmd);
-                break;
-            case USER_DEFINED:
-            default:
-                if (cmd->type >= USER_DEFINED && cmd->type < USER_DEFINED + USER_CMDS_COUNT) {
-                    Command *user_cmd = &commands.items[get_command_index(cmd)];
-                    da_foreach(user_cmd->subcmds, Command, subcmd)
-                        execute_cmd(subcmd);
-                    break;
-                } else print_error_and_exit("Unreachable command type %u in execute_cmd\n", cmd->type);
-        }
-    }
+    log_this("Executing command `%s`", cmd->name);
+
+    // TODO: adesso dovrebbe bastare questo
+    CommandArgs final_args = {0};
+    da_append_many(&final_args, cmd->baked_args);
+    if (runtime_args) args_append(&final_args, runtime_args);
+    if (cmd->execute) cmd->execute(&final_args);
+    free(final_args.items);
+
+    //static_assert(BUILTIN_CMDS_COUNT == 13, "Execute all commands in execute_cmd");
+    //for (size_t i = 0; i < cmd->n; i++ ) {
+    //    switch (cmd->type)
+    //    {
+    //        case BUILTIN_SAVE             : save();                      break;
+    //        case BUILTIN_QUIT             : if (can_quit()) quit();      break;
+    //        case BUILTIN_SAVE_AND_QUIT    : save(); quit();              break;
+    //        case BUILTIN_FORCE_QUIT       : quit();                      break;
+    //        case BUILTIN_MOVE_CURSOR_UP   : builtin_move_cursor_up();    break;
+    //        case BUILTIN_MOVE_CURSOR_DOWN : builtin_move_cursor_down();  break; 
+    //        case BUILTIN_MOVE_CURSOR_LEFT : builtin_move_cursor_left();  break;
+    //        case BUILTIN_MOVE_CURSOR_RIGHT: builtin_move_cursor_right(); break;
+    //        case BUILTIN_MOVE_LINE_UP     : builtin_move_line_up();      break;
+    //        case BUILTIN_MOVE_LINE_DOWN   : builtin_move_line_down();    break;
+    //        case BUILTIN_INSERT           : builtin_insert(cmd);         break;
+    //        case BUILTIN_DATE             : builtin_date();              break;
+    //        case BUILTIN_GOTO_LINE        : builtin_goto_line(cmd);      break;
+    //        case UNKNOWN: enqueue_message("Unknown command `%s`", cmd->name); break;
+    //        case BUILTIN_CMDS_COUNT:
+    //            print_error_and_exit("Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
+    //        case CLI:
+    //            da_foreach(cmd->subcmds, Command, subcmd)
+    //                execute_cmd(subcmd);
+    //            break;
+    //        case USER_DEFINED:
+    //        default:
+    //            if (cmd->type >= USER_DEFINED && cmd->type < USER_DEFINED + USER_CMDS_COUNT) {
+    //                Command *user_cmd = &commands.items[get_command_index(cmd)];
+    //                da_foreach(user_cmd->subcmds, Command, subcmd)
+    //                    execute_cmd(subcmd);
+    //                break;
+    //            } else print_error_and_exit("Unreachable command type %u in execute_cmd\n", cmd->type);
+    //    }
+    //}
 }
 
 void insert_newline_and_keep_pos()
