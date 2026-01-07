@@ -319,7 +319,7 @@ static CommandsHistory commands_history = {0};
 
 void commands_history_add(char *cmd)
 {
-    log_this("Adding command in history: `%s`", cmd);
+    //log_this("Adding command in history: `%s`", cmd);
     da_push(&commands_history, strdup(cmd));
     commands_history.index = -1;
 }
@@ -447,144 +447,141 @@ typedef struct
     size_t col;
 } Location;
 
-char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
-{
-    *cmds = (Commands){0};
-    char *saveptr_cmds;
-    char *cmd_str = strtok_r(cmds_str, " \t", &saveptr_cmds);
-    while (cmd_str != NULL) {
-        Command cmd = {0};
-
-        if (isdigit(*cmd_str)) {
-            char *end_of_n;
-            errno = 0;
-            long n = strtol(cmd_str, &end_of_n, 10);
-            if (loc) loc->col += end_of_n - cmd_str;
-            if (n <= 0) {
-                char *error = malloc(sizeof(char)*256);
-                if (sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n) == -1) {
-                    print_error_and_exit("Could not allocate memory, buy more RAM");
-                } else return error;
-            } else cmd.n = n;
-            cmd_str = end_of_n;
-        } else cmd.n = 1;
-
-        Strings args = {0};
-        *cmd_args = (CommandArgs){0};
-        char *args_str = strchr(cmd_str, '.');
-        if (args_str != NULL) {
-            *args_str = '\0';
-            args_str++;
-            if (!strchr(args_str, ',')) {
-                da_push(&args, strdup(args_str));
-            } else {
-                char *saveptr_args;
-                char *arg = strtok_r(args_str, ",", &saveptr_args);
-                while (arg != NULL) { // TODO: qui dovrei riportare errori del tipo: "cmd.arg1,"
-                                      // - si presuppone che ci sia un altro argomento che in realta' non c'e'
-                                      // - forse non posso usare strtok
-                    da_push(&args, strdup(arg));
-                    arg = strtok_r(NULL, ",", &saveptr_args);
-                }
-            }
-        }
-        cmd.type = parse_cmdtype(cmd_str);
-        if (cmd.type == UNKNOWN) {
-            char *error = malloc(sizeof(char)*256);
-            // TODO: track location
-            if (sprintf(error, "unknown command `%s`", cmd_str) == -1) {
-                print_error_and_exit("Could not allocate memory, buy more RAM");
-            } else return error;
-        }
-
-        int index = get_command_index(&cmd);
-        if (index == -1) {
-            print_error_and_exit("TODO: invalid command\n");
-        }
-        const Command *ref_cmd = &commands.items[index];
-        cmd.name = ref_cmd->name;
-        if (cmd_args) {
-            cmd.args = (CommandArgs){0};
-            CommandArg *ref_arg;
-            char *arg;
-            for (size_t i = 0; i < args.count; i++) {
-                ref_arg = &ref_cmd->args.items[i];
-                arg = args.items[i];
-                if (ref_arg->needed) {
-                    CommandArg actual_arg = *ref_arg;
-                    switch (ref_arg->type)
-                    {
-                        case ARG_UINT: {
-                            size_t value = atoi(arg);
-                            if (value == 0 && !streq(arg, "0")) {
-                                char *error = malloc(sizeof(char)*256);
-                                // TODO: track location
-                                if (sprintf(error, "expecting a number greater than 0, but got `%s`", arg) == -1) {
-                                    print_error_and_exit("Could not allocate memory, buy more RAM");
-                                } else return error;
-                            }
-                            actual_arg.value = malloc(sizeof(size_t)); // NOTE: rember to free
-                            *(size_t *)actual_arg.value = value;
-                        } break;
-                        case ARG_STRING:
-                            // TODO: allora, devo farlo a mano e devo prima cercare negli argomenti se ce ne sono ancora (caso "ciao,come,stai"), altrimenti continuo con la line (caso "ciao come stai"), poi salvo la fine in saveptr_cmds e da li' si continua con gli altri comandi
-                            if (*arg == '\"') {
-                                size_t arglen = strlen(arg);
-                                if (arglen == 1 || arg[arglen-1] != '\"') {
-                                    String str = {0};
-                                    s_push_cstr(&str, arg);
-                                    size_t j;
-                                    bool done = false;
-                                    for (j = i+1; j < args.count; j++) {
-                                        if (strchr(args.items[j], '\"')) {
-                                            char *popped_arg = args.items[j];
-                                            da_remove(&args, j);
-                                            s_push(&str, ',');
-                                            s_push_cstr(&str, popped_arg);
-                                            done = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!done && j >= args.count) { // TODO: search after all the arguments char by char
-                                        char *rest_of_str = saveptr_cmds;
-                                        size_t len = strlen(rest_of_str);
-                                        char *end = rest_of_str+len-1;
-                                        while (isspace(*end)) end--;
-                                        *(end+1) = '\0';
-                                        size_t k = 0;
-                                        while (k < len && *rest_of_str != '\"') {
-                                            s_push(&str, *rest_of_str);
-                                            rest_of_str++;
-                                        }
-                                        if (k >= len) {
-                                            // TODO: track location
-                                            return strdup("unclosed quoted string");
-                                        } else s_push(&str, '\"');
-                                        saveptr_cmds = rest_of_str+1;
-                                    }
-                                    s_push_null(&str);
-                                    arg = str.items;
-                                }
-                                arg[strlen(arg)-1] = '\0';
-                                arg++;
-                            }
-                            // TODO: add support for char '\n' in string arg
-                            // TODO: add support for char '"' in string arg
-                            actual_arg.value = strdup(arg); // NOTE: rember to free
-                            break;
-                        default:
-                            print_error_and_exit("Unreachable command arg type %u in parse_cmds\n", ref_arg->type);
-                    }
-                    da_push(&cmd.args, actual_arg);
-                } else da_push(&cmd.args, *ref_arg);
-            }
-        }
-
-        da_push(cmds, cmd);
-        cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
-    }
-    return NULL;
-}
+//char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
+//{
+//    *cmds = (Commands){0};
+//    char *saveptr_cmds;
+//    char *cmd_str = strtok_r(cmds_str, " \t", &saveptr_cmds);
+//    while (cmd_str != NULL) {
+//        Command cmd = {0};
+//
+//        if (isdigit(*cmd_str)) {
+//            char *end_of_n;
+//            errno = 0;
+//            long n = strtol(cmd_str, &end_of_n, 10);
+//            if (loc) loc->col += end_of_n - cmd_str;
+//            if (n <= 0) {
+//                char *error = malloc(sizeof(char)*256);
+//                sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n);
+//                return error;
+//            } else cmd.n = n;
+//            cmd_str = end_of_n;
+//        } else cmd.n = 1;
+//
+//        Strings args = {0};
+//        *cmd_args = (CommandArgs){0};
+//        char *args_str = strchr(cmd_str, '.');
+//        if (args_str != NULL) {
+//            *args_str = '\0';
+//            args_str++;
+//            if (!strchr(args_str, ',')) {
+//                da_push(&args, strdup(args_str));
+//            } else {
+//                char *saveptr_args;
+//                char *arg = strtok_r(args_str, ",", &saveptr_args);
+//                while (arg != NULL) { // TODO: qui dovrei riportare errori del tipo: "cmd.arg1,"
+//                                      // - si presuppone che ci sia un altro argomento che in realta' non c'e'
+//                                      // - forse non posso usare strtok
+//                    da_push(&args, strdup(arg));
+//                    arg = strtok_r(NULL, ",", &saveptr_args);
+//                }
+//            }
+//        }
+//        cmd.type = parse_cmdtype(cmd_str);
+//        if (cmd.type == UNKNOWN) {
+//            char *error = malloc(sizeof(char)*256);
+//            // TODO: track location
+//            sprintf(error, "unknown command `%s`", cmd_str);
+//            return error;
+//        }
+//
+//        int index = get_command_index(&cmd);
+//        if (index == -1) {
+//            print_error_and_exit("TODO: invalid command\n");
+//        }
+//        const Command *ref_cmd = &commands.items[index];
+//        cmd.name = ref_cmd->name;
+//        if (cmd_args) {
+//            cmd.args = (CommandArgs){0};
+//            CommandArg *ref_arg;
+//            char *arg;
+//            for (size_t i = 0; i < args.count; i++) {
+//                ref_arg = &ref_cmd->args.items[i];
+//                arg = args.items[i];
+//                if (ref_arg->needed) {
+//                    CommandArg actual_arg = *ref_arg;
+//                    switch (ref_arg->type)
+//                    {
+//                        case ARG_UINT: {
+//                            size_t value = atoi(arg);
+//                            if (value == 0 && !streq(arg, "0")) {
+//                                char *error = malloc(sizeof(char)*256);
+//                                // TODO: track location
+//                                sprintf(error, "expecting a number greater than 0, but got `%s`", arg);
+//                                return error;
+//                            }
+//                            actual_arg.value = malloc(sizeof(size_t)); // NOTE: rember to free
+//                            *(size_t *)actual_arg.value = value;
+//                        } break;
+//                        case ARG_STRING:
+//                            // TODO: allora, devo farlo a mano e devo prima cercare negli argomenti se ce ne sono ancora (caso "ciao,come,stai"), altrimenti continuo con la line (caso "ciao come stai"), poi salvo la fine in saveptr_cmds e da li' si continua con gli altri comandi
+//                            if (*arg == '\"') {
+//                                size_t arglen = strlen(arg);
+//                                if (arglen == 1 || arg[arglen-1] != '\"') {
+//                                    String str = {0};
+//                                    s_push_cstr(&str, arg);
+//                                    size_t j;
+//                                    bool done = false;
+//                                    for (j = i+1; j < args.count; j++) {
+//                                        if (strchr(args.items[j], '\"')) {
+//                                            char *popped_arg = args.items[j];
+//                                            da_remove(&args, j);
+//                                            s_push(&str, ',');
+//                                            s_push_cstr(&str, popped_arg);
+//                                            done = true;
+//                                            break;
+//                                        }
+//                                    }
+//                                    if (!done && j >= args.count) { // TODO: search after all the arguments char by char
+//                                        char *rest_of_str = saveptr_cmds;
+//                                        size_t len = strlen(rest_of_str);
+//                                        char *end = rest_of_str+len-1;
+//                                        while (isspace(*end)) end--;
+//                                        *(end+1) = '\0';
+//                                        size_t k = 0;
+//                                        while (k < len && *rest_of_str != '\"') {
+//                                            s_push(&str, *rest_of_str);
+//                                            rest_of_str++;
+//                                        }
+//                                        if (k >= len) {
+//                                            // TODO: track location
+//                                            return strdup("unclosed quoted string");
+//                                        } else s_push(&str, '\"');
+//                                        saveptr_cmds = rest_of_str+1;
+//                                    }
+//                                    s_push_null(&str);
+//                                    arg = str.items;
+//                                }
+//                                arg[strlen(arg)-1] = '\0';
+//                                arg++;
+//                            }
+//                            // TODO: add support for char '\n' in string arg
+//                            // TODO: add support for char '"' in string arg
+//                            actual_arg.value = strdup(arg); // NOTE: rember to free
+//                            break;
+//                        default:
+//                            print_error_and_exit("Unreachable command arg type %u in parse_cmds\n", ref_arg->type);
+//                    }
+//                    da_push(&cmd.args, actual_arg);
+//                } else da_push(&cmd.args, *ref_arg);
+//            }
+//        }
+//
+//        da_push(cmds, cmd);
+//        cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
+//    }
+//    return NULL;
+//}
 
 size_t trim_left(char **str)
 {
@@ -606,12 +603,13 @@ void trim(char **str)
     trim_right(*str);
 }
 
+#define NO_LOCATION NULL
 char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
 {
     (void)cmd_args;
 
     if (loc) loc->col += trim_left(&cmds_str);
-    log_this("- Parsing cmds from `%s`", cmds_str);
+    //log_this("- Parsing cmds from `%s`", cmds_str);
     *cmds = (Commands){0};
     size_t i = 0;
     size_t len = strlen(cmds_str);
@@ -623,15 +621,14 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
             long n = strtol(cmds_str, &end_of_n, 10);
             if (n <= 0) {
                 char *error = malloc(sizeof(char)*256);
-                if (sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n) == -1) {
-                    print_error_and_exit("Could not allocate memory, buy more RAM");
-                } else return error;
+                sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n);
+                return error;
             } else cmd.n = n;
             if (loc) loc->col += end_of_n - cmds_str;
             i += end_of_n - cmds_str;
             cmds_str = end_of_n;
         } else cmd.n = 1;
-        log_this("multiplicity: %zu", cmd.n);
+        //log_this("multiplicity: %zu", cmd.n);
 
         char *end_of_cmd_name = strpbrk(cmds_str, " \t(");
         bool has_args = false;
@@ -642,10 +639,11 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
         cmd.type = parse_cmdtype(cmds_str);
         if (cmd.type == UNKNOWN) {
             char *error = malloc(sizeof(char)*256);
-            if (sprintf(error, "unknown command `%s`", cmds_str) == -1) {
-                print_error_and_exit("Could not allocate memory, buy more RAM");
-            } else return error;
-        } else log_this("name: `%s` => type: %d", cmds_str, cmd.type);
+            sprintf(error, "unknown command `%s`", cmds_str);
+            return error;
+        } else {
+            //log_this("name: `%s` => type: %d", cmds_str, cmd.type);
+        }
 
         int index = get_command_index(&cmd);
         if (index == -1) {
@@ -655,9 +653,8 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
         cmd.name = ref_cmd->name;
         if (has_args && ref_cmd->args.count == 0) {
             char *error = malloc(sizeof(char)*256);
-            if (sprintf(error, "command `%s` does not require arguments", cmd.name) == -1) {
-                print_error_and_exit("Could not allocate memory, buy more RAM");
-            } else return error;
+            sprintf(error, "command `%s` does not require arguments", cmd.name);
+            return error;
         }
         size_t name_len = strlen(cmds_str);
         cmds_str += name_len + 1;
@@ -677,7 +674,7 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
             if (argslen == 0) return strdup("no arguments provided");
             if (loc) loc->col++;
 
-            log_this("  > Parsing arguments `%s` (%zu)", cmds_str, argslen);
+            //log_this("  > Parsing arguments `%s` (%zu)", cmds_str, argslen);
             size_t args_count = 0;
             char *arg = cmds_str;
             bool in_string = false;
@@ -695,11 +692,10 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
                     if (arglen == 0) {
                         char *error = malloc(sizeof(char)*256);
                         // TODO: report the type maybe
-                        if (sprintf(error, "Argument %zu not provided", args_count+1) == -1) {
-                            print_error_and_exit("Could not allocate memory, buy more RAM");
-                        } else return error;
+                        sprintf(error, "Argument %zu not provided", args_count+1);
+                        return error;
                     }
-                    log_this("    - TODO: parse argument `%.*s`", arglen, cmds_str);
+                    //log_this("    - TODO: parse argument `%.*s`", arglen, cmds_str);
                     cmds_str += arglen;
                     argslen -= arglen;
                     j = 1;
@@ -920,8 +916,8 @@ void load_config()
                 *colon = '\0';
                 char *cmd_name = line;
                 bool already_defined = false;
-                for (size_t i = 0; i < commands.count; i++) {
-                    if (streq(cmd_name, commands.items[i].name)) {
+                da_enumerate(commands, Command, i, command) {
+                    if (streq(cmd_name, command->name)) {
                         s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                         s_push_fstr(&config_log, "ERROR: redeclaration of %s command `%s`\n", 
                                 i < BUILTIN_CMDS_COUNT ? "builtin" : "user defined", cmd_name); 
@@ -1082,8 +1078,7 @@ void load_config()
 
     if (remaining_fields.count > 0) {
         s_push_cstr(&config_log, "\nWARNING: the following fields have not been set:\n");
-        for (size_t i = 0; i < remaining_fields.count; i++) {
-            const ConfigField *field = &remaining_fields.items[i];
+        da_foreach(remaining_fields, ConfigField, field) {
             s_push_fstr(&config_log, " -> %s (type: %s, default: ", field->name, fieldtype_to_string(field->type));
             switch (field->type)
             {
@@ -1724,8 +1719,6 @@ static inline void move_cursor_end_of_line() { editor.cx = win_main.width-1; }
 void move_cursor_first_non_space()
 {
     size_t count = CURRENT_ROW->content.count;
-    log_this("cy = %zu", CURRENT_Y_POS);
-    log_this("`"S_FMT"` (%zu)\n", S_ARG(CURRENT_ROW->content), count);
     if (count == 0) return;
     editor.cx = 0;
     while (editor.cx < count && isspace(CURRENT_CHAR))
@@ -1765,9 +1758,7 @@ void itoa(int n, char *buf)
 bool save(void)
 {
     String save_buf = {0};
-    Row *row;
-    for (size_t i = 0; i < editor.rows.count; i++) {
-        row = ROW(i);
+    da_foreach(editor.rows, Row, row) {
         s_push_str(&save_buf, row->content.items, row->content.count);
         s_push(&save_buf, '\n');
     }
@@ -1863,7 +1854,7 @@ void insert_char(char c)
             };
             Commands subcmds = {0};
             CommandArgs args = {0};
-            char *parse_error = better_parse_cmds(cmd_str, &subcmds, &args, NULL);
+            char *parse_error = better_parse_cmds(cmd_str, &subcmds, &args, NO_LOCATION);
             //char *parse_error = parse_cmds(cmd_str, &subcmds, &args, NULL);
             if (parse_error != NULL) {
                 enqueue_message("ERROR: %s", parse_error);
@@ -1933,7 +1924,9 @@ void builtin_date(void)
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     char date[64];
+    // TODO: error message if it fails, not an assert
     assert(strftime(date, sizeof(date), "%c", tm));
+    log_this("%s", date);
     for (size_t i = 0; i < strlen(date); i++) {
         insert_char(date[i]);
     }
@@ -1948,6 +1941,7 @@ void builtin_goto_line(const Command *cmd)
 
 void execute_cmd(const Command *cmd)
 {
+    log_this("Executing `%s`", cmd->name);
     static_assert(BUILTIN_CMDS_COUNT == 13, "Execute all commands in execute_cmd");
     for (size_t i = 0; i < cmd->n; i++ ) {
         switch (cmd->type)
@@ -1969,21 +1963,15 @@ void execute_cmd(const Command *cmd)
             case BUILTIN_CMDS_COUNT:
                 print_error_and_exit("Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
             case CLI:
-                Command *subcmd = NULL;
-                for (size_t i = 0; i < cmd->subcmds.count; i++) {
-                    subcmd = &cmd->subcmds.items[i];
+                da_foreach(cmd->subcmds, Command, subcmd)
                     execute_cmd(subcmd);
-                }
                 break;
             case USER_DEFINED:
             default:
                 if (cmd->type >= USER_DEFINED && cmd->type < USER_DEFINED + USER_CMDS_COUNT) {
                     Command *user_cmd = &commands.items[get_command_index(cmd)];
-                    Command *subcmd = NULL;
-                    for (size_t i = 0; i < user_cmd->subcmds.count; i++) {
-                        subcmd = &user_cmd->subcmds.items[i];
+                    da_foreach(user_cmd->subcmds, Command, subcmd)
                         execute_cmd(subcmd);
-                    }
                     break;
                 } else print_error_and_exit("Unreachable command type %u in execute_cmd\n", cmd->type);
         }
@@ -2084,7 +2072,6 @@ bool set_N(int key)
         editor.N *= 10;
         editor.N += digit;
     }
-    log_this("new N: %d\n", editor.N);
     return true;
 }
 
