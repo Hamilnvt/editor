@@ -235,6 +235,7 @@ typedef enum
     BUILTIN_QUIT,
     BUILTIN_SAVE_AND_QUIT,
     BUILTIN_FORCE_QUIT,
+    BUILTIN_MOVE_CURSOR,
     BUILTIN_MOVE_CURSOR_UP,
     BUILTIN_MOVE_CURSOR_DOWN,
     BUILTIN_MOVE_CURSOR_LEFT,
@@ -246,42 +247,77 @@ typedef enum
     BUILTIN_GOTO_LINE,
     BUILTIN_CMDS_COUNT,
     UNKNOWN,
-    CLI,
+    COMMAND_FROM_LINE,
     USER_DEFINED,
 } CommandType;
 
-static_assert(BUILTIN_CMDS_COUNT == 13, "Associate a name to all builtin commands");
+static_assert(BUILTIN_CMDS_COUNT == 14, "Associate a name to all builtin commands");
 /* NOTE: name of the builtin commands */
 #define SAVE              "s"
 #define QUIT              "q"
 #define SAVE_AND_QUIT     "sq"
 #define FORCE_QUIT        "fq"
-#define MOVE_CURSOR_UP    "u"
-#define MOVE_CURSOR_DOWN  "d"
-#define MOVE_CURSOR_LEFT  "l"
-#define MOVE_CURSOR_RIGHT "r"
-#define MOVE_LINE_UP      "lnu"
-#define MOVE_LINE_DOWN    "lnd"
+#define MOVE_CURSOR       "mv"
+#define MOVE_CURSOR_UP    "mvu"
+#define MOVE_CURSOR_DOWN  "mvd"
+#define MOVE_CURSOR_LEFT  "mvl"
+#define MOVE_CURSOR_RIGHT "mvr"
+#define MOVE_LINE_UP      "mvlu"
+#define MOVE_LINE_DOWN    "mvld"
 #define INSERT            "i"
 #define DATE              "date"
 #define GOTO_LINE         "goto"
 
 typedef enum
 {
+    ARG_INT,
     ARG_UINT,
-    ARG_STRING
+    ARG_STRING,
+    ARG_PLACEHOLDER
 } CommandArgType;
 
 typedef struct
 {
     CommandArgType type;
     union {
+        int int_value;
         size_t uint_value;
         char *string_value;
+        size_t placeholder_index;
     };
     size_t index;
     char *name;
 } CommandArg;
+
+CommandArg make_command_arg_int(int value, size_t index, char *name) 
+{
+    return (CommandArg){
+        .type = ARG_INT,
+        .int_value = value,
+        .index = index,
+        .name = strdup(name)
+    };
+}
+
+CommandArg make_command_arg_uint(size_t value, size_t index, char *name) 
+{
+    return (CommandArg){
+        .type = ARG_UINT,
+        .uint_value = value,
+        .index = index,
+        .name = strdup(name)
+    };
+}
+
+CommandArg make_command_arg_string(char *value, size_t index, char *name) 
+{
+    return (CommandArg){
+        .type = ARG_STRING,
+        .string_value = strdup(value),
+        .index = index,
+        .name = strdup(name)
+    };
+}
 
 typedef struct
 {
@@ -289,6 +325,22 @@ typedef struct
     size_t count;
     size_t capacity;
 } CommandArgs;
+
+CommandArgs deep_copy_command_args(const CommandArgs *args)
+{
+    CommandArgs copy = {0};
+    copy.items = malloc(sizeof(CommandArg)*args->count);
+    copy.count = args->count;
+    copy.capacity = args->capacity;
+    for (size_t i = 0; i < args->count; i++) {
+        copy.items[i] = args->items[i];
+        copy.items[i].name = strdup(args->items[i].name);
+        if (args->items[i].type == ARG_STRING) {
+            copy.items[i].string_value = strdup(args->items[i].string_value);
+        }
+    }
+    return copy;
+}
 
 typedef struct Command Command;
 
@@ -299,16 +351,17 @@ typedef struct
     size_t capacity;
 } Commands;
 
-typedef struct
+typedef void (*CommandFn)(Command *cmd, CommandArgs *args);
+
+struct Command
 {
     char *name;
     CommandType type;
-    CommandArgs args;
     CommandArgs baked_args;
     Commands subcmds;
     size_t n;
-    void (*execute)(CommandArgs *args);
-} Command;
+    CommandFn execute;
+};
 
 static Commands commands = {0}; // NOTE: all commands are stored in here
 
@@ -363,21 +416,23 @@ void commands_history_next()
 
 #define USER_CMDS_COUNT (commands.count - BUILTIN_CMDS_COUNT)
 
-bool expect_n_arguments(const Command *cmd, size_t n)
+bool expect_n_arguments(Command *cmd, CommandArgs *args, size_t n)
 {
-    if (cmd->args.count == n) return true;
+    if (args->count == n) return true;
 
-    enqueue_message("ERROR: command `%s` expects %zu argument%s, but got %zu", cmd->name, n, n == 1 ? "" : "s", cmd->args.count);
+    enqueue_message("ERROR: command `%s` expects %zu argument%s, but got %zu",
+            cmd->name, n, n == 1 ? "" : "s", args->count);
     return false;
 }
 
 CommandType parse_cmdtype(char *type)
 {
-    static_assert(BUILTIN_CMDS_COUNT == 13, "Parse all commands in parse_cmd");
+    static_assert(BUILTIN_CMDS_COUNT == 14, "Parse all commands in parse_cmd");
     if      (streq(type, SAVE))              return BUILTIN_SAVE;
     else if (streq(type, QUIT))              return BUILTIN_QUIT;
     else if (streq(type, SAVE_AND_QUIT))     return BUILTIN_SAVE_AND_QUIT;
     else if (streq(type, FORCE_QUIT))        return BUILTIN_FORCE_QUIT;
+    else if (streq(type, MOVE_CURSOR))       return BUILTIN_MOVE_CURSOR;
     else if (streq(type, MOVE_CURSOR_UP))    return BUILTIN_MOVE_CURSOR_UP;
     else if (streq(type, MOVE_CURSOR_DOWN))  return BUILTIN_MOVE_CURSOR_DOWN;
     else if (streq(type, MOVE_CURSOR_LEFT))  return BUILTIN_MOVE_CURSOR_LEFT;
@@ -396,25 +451,19 @@ CommandType parse_cmdtype(char *type)
     }
 }
 
-void add_builtin_command(char *name, CommandType type, CommandArgs args)
+void add_builtin_command(char *name, CommandType type, CommandFn execute, CommandArgs *baked_args)
 {
-    Command cmd = {
-        .name = name,
-        .type = type,
-        .args = args,
-    };
+    Command cmd = {0};
+    cmd.name = name;
+    cmd.type = type;
+    if (baked_args) cmd.baked_args = deep_copy_command_args(baked_args);
+    cmd.execute = execute;
     da_push(&commands, cmd);
 }
 
-void add_user_command(char *name, CommandArgs args, Commands subcmds)
+void add_user_command(Command cmd)
 {
-    Command cmd = {
-        .name = strdup(name),
-        .type = USER_DEFINED + commands.count - BUILTIN_CMDS_COUNT,
-        .args = args,
-        .subcmds = subcmds,
-        .n = 1
-    };
+    cmd.type = USER_DEFINED + commands.count - BUILTIN_CMDS_COUNT;
     da_push(&commands, cmd);
 }
 
@@ -425,17 +474,36 @@ int get_command_index(const Command *cmd)
     else return -1;
 }
 
-//void free_commands(Commands *cmds)
-//{
-//    for (size_t i = 0; i < cmds->count; i++) {
-//        Command *cmd = &cmds->items[i];
-//        for (size_t j = 0; j < cmd->args.count; j++) {
-//            free(cmd->args.items[j]);
-//        }
-//        if (cmd->args.count > 0) da_free(&cmd->args);
-//    }
-//    da_free(cmds);
-//}
+void free_command_arg(CommandArg *arg)
+{
+    if (arg->name) free(arg->name);
+    if (arg->type == ARG_STRING) free(arg->string_value);
+}
+
+void free_command_args(CommandArgs *args)
+{
+    da_foreach(*args, CommandArg, arg)
+        free_command_arg(arg);
+    da_free(args);
+}
+
+void free_commands(Commands *cmds);
+void free_command(Command *cmd)
+{
+    if (cmd->type > BUILTIN_CMDS_COUNT && cmd->type != COMMAND_FROM_LINE)
+        free(cmd->name);
+    if (cmd->baked_args.count > 0)
+        free_command_args(&cmd->baked_args);
+    if (cmd->subcmds.count > 0)
+        free_commands(&cmd->subcmds);
+}
+
+void free_commands(Commands *cmds)
+{
+    da_foreach(*cmds, Command, cmd)
+        free_command(cmd);
+    da_free(cmds);
+}
 
 //void print_commands(const Commands *cmds)
 //{
@@ -622,17 +690,16 @@ void trim(char **str)
 */
 
 #define NO_LOCATION NULL
-char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
+char *better_parse_cmds(char *cmds_str, Command *cmd, CommandArgs *args, Location *loc)
 {
-    (void)cmd_args;
+    (void)args; // TODO
 
     if (loc) loc->col += trim_left(&cmds_str);
     //log_this("- Parsing cmds from `%s`", cmds_str);
-    *cmds = (Commands){0};
     size_t i = 0;
     size_t len = strlen(cmds_str);
     while (i < len && strlen(cmds_str) > 0) {
-        Command cmd = {0};
+        Command subcmd = {0};
 
         if (isdigit(*cmds_str)) {
             char *end_of_n;
@@ -641,12 +708,12 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
                 char *error = malloc(sizeof(char)*256);
                 sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n);
                 return error;
-            } else cmd.n = n;
+            } else subcmd.n = n;
             if (loc) loc->col += end_of_n - cmds_str;
             i += end_of_n - cmds_str;
             cmds_str = end_of_n;
-        } else cmd.n = 1;
-        //log_this("multiplicity: %zu", cmd.n);
+        } else subcmd.n = 1;
+        //log_this("multiplicity: %zu", subcmd.n);
 
         char *end_of_cmd_name = strpbrk(cmds_str, " \t(");
         bool has_args = false;
@@ -654,26 +721,30 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
             if (*end_of_cmd_name == '(') has_args = true;
             *end_of_cmd_name = '\0';
         }
-        cmd.type = parse_cmdtype(cmds_str);
-        if (cmd.type == UNKNOWN) {
+        subcmd.type = parse_cmdtype(cmds_str);
+        if (subcmd.type == UNKNOWN) {
             char *error = malloc(sizeof(char)*256);
             sprintf(error, "unknown command `%s`", cmds_str);
             return error;
         } else {
-            //log_this("name: `%s` => type: %d", cmds_str, cmd.type);
+            //log_this("name: `%s` => type: %d", cmds_str, subcmd.type);
         }
 
-        int index = get_command_index(&cmd);
+        int index = get_command_index(&subcmd);
         if (index == -1) {
-            print_error_and_exit("FATAL: unreachable command `%d`\n", cmd.type);
+            print_error_and_exit("FATAL: unreachable command `%d`\n", subcmd.type);
         }
         const Command *ref_cmd = &commands.items[index];
-        cmd.name = ref_cmd->name;
-        if (has_args && ref_cmd->args.count == 0) {
-            char *error = malloc(sizeof(char)*256);
-            sprintf(error, "command `%s` does not require arguments", cmd.name);
-            return error;
-        }
+        subcmd.name = ref_cmd->name;
+        subcmd.execute = ref_cmd->execute;
+        if (ref_cmd->baked_args.count > 0)
+            subcmd.baked_args = deep_copy_command_args(&ref_cmd->baked_args);
+        // TODO: Command does not contains arguments anymore, this logic is moved to the execute function
+        //if (has_args && ref_cmd->args.count == 0) {
+        //    char *error = malloc(sizeof(char)*256);
+        //    sprintf(error, "command `%s` does not require arguments", subcmd.name);
+        //    return error;
+        //}
         size_t name_len = strlen(cmds_str);
         cmds_str += name_len + 1;
         if (loc) loc->col += name_len;
@@ -731,7 +802,7 @@ char *better_parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, L
             cmds_str = end_of_cmd_args + 1;
         }
 
-        da_push(cmds, cmd);
+        da_push(&cmd->subcmds, subcmd);
         if (loc) loc->col += trim_left(&cmds_str);
     }
 
@@ -808,8 +879,283 @@ typedef struct
 } Config;
 Config config = {0};
 
-int read_key(); // Forward declaration
+void save(void)
+{
+    String save_buf = {0};
+    da_foreach(editor.rows, Row, row) {
+        s_push_str(&save_buf, row->content.items, row->content.count);
+        s_push(&save_buf, '\n');
+    }
 
+    // TODO: make the user decide, in the status line, the name of the file if not set
+    // - probabilmente devo fare un sistema che permetta di cambiare l'inizio della command line (ora e' sempre Command:) e poi fare cose diverse una volta che si e' premuto ENTER
+    int fd = open(editor.filename, O_RDWR|O_CREAT, 0644);
+    if (fd == -1) goto writeerr;
+
+    /* Use truncate + a single write(2) call in order to make saving
+     * a bit safer, under the limits of what we can do in a small editor. */
+    ssize_t len = save_buf.count;
+    if (ftruncate(fd, len) == -1) goto writeerr;
+    if (write(fd, save_buf.items, len) != len) goto writeerr;
+
+    close(fd);
+    s_free(&save_buf);
+    editor.dirty = 0;
+    enqueue_message("%zu bytes written on disk", len);
+    return;
+
+writeerr:
+    s_free(&save_buf);
+    if (fd != -1) close(fd);
+    enqueue_message("Can't save! I/O error: %s", strerror(errno));
+}
+
+// TODO: argomento per salvare il file con un nome
+void builtin_save(Command *cmd, CommandArgs *args)
+{
+    (void)cmd;
+    (void)args;
+    save();
+}
+
+_Noreturn void quit() { exit(0); }
+
+bool can_quit(void)
+{
+    if (!editor.dirty || editor.current_quit_times == 0) return true;
+
+    // TODO: set higher priority messages that overwrite the current and then restore them after msg_lifetime secs
+    // - da pensare 
+    enqueue_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
+    editor.current_quit_times--;
+    return false;
+}
+
+void builtin_quit(Command *cmd, CommandArgs *args)
+{
+    (void)cmd;
+    (void)args;
+    if (can_quit()) quit();
+}
+
+void builtin_save_and_quit(Command *cmd, CommandArgs *args)
+{
+    (void)cmd;
+    (void)args;
+    builtin_save(cmd, args); quit();
+}
+
+void builtin_force_quit(Command *cmd, CommandArgs *args)
+{
+    (void)cmd;
+    (void)args;
+    quit();
+}
+
+void move_cursor_up(void)
+{
+    if (editor.cy == 0 && editor.page != 0) {
+        editor.offset--;
+        // TODO: deve cambiare anche la pagina, ma come?
+    }
+    if (editor.cy - N_OR_DEFAULT(1) > 0) editor.cy -= N_OR_DEFAULT(1);
+    else editor.cy = 0;
+}
+
+void move_cursor_down(void)
+{ 
+    //if ((editor.offset+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.offset+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'offset in questo caso
+    if (editor.cy == win_main.height-1 && editor.page != N_PAGES-1) {
+        editor.offset++;
+        // TODO: deve cambiare anche la pagina, ma come?
+    }
+    if (editor.cy+N_OR_DEFAULT(1) < win_main.height-1) editor.cy += N_OR_DEFAULT(1);
+    else editor.cy = win_main.height-1;
+    //if (editor.offset < editor.rows.count-N_OR_DEFAULT(0)-1) editor.offset += N_OR_DEFAULT(1); 
+    //else editor.offset = editor.rows.count-1;
+}
+
+void move_cursor_left(void)
+{
+    if (editor.in_cmd) {
+        if (editor.cmd_pos > 0) editor.cmd_pos -= 1;
+        else editor.cmd_pos = 0;
+    } else {
+        if (editor.cx > 0) editor.cx -= 1;
+        else editor.cx = 0;
+    }
+}
+
+void move_cursor_right(void)
+{
+    if (editor.in_cmd) {
+        if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos += 1;
+        else editor.cmd_pos = editor.cmd.count;
+    } else {
+        if (editor.cx < win_main.width-1) editor.cx += 1;
+        else editor.cx = win_main.width-1;
+    }
+}
+
+void builtin_move_cursor(Command *cmd, CommandArgs *args) 
+{
+    (void)cmd;
+
+    if (args->count != 2) {
+        enqueue_message("COMMAND ERROR: command %s takes 2 arguments, but got %zu", args->count);
+        return;
+    }
+
+    size_t x = args->items[0].int_value;
+    size_t y = args->items[1].int_value;
+
+    if (x > 0) for (size_t i = 0; i < x; i++) move_cursor_right();
+    else       for (int i = x; i >= 0; i++) move_cursor_left();
+
+    if (y > 0) for (size_t i = 0; i < y; i++) move_cursor_down();
+    else       for (int i = y; i >= 0; i++) move_cursor_up();
+}
+
+void builtin_move_line_up()
+{
+    size_t y = CURRENT_Y_POS;
+    if (y == 0) return;
+    Row tmp = editor.rows.items[y];
+    editor.rows.items[y] = editor.rows.items[y-1];
+    editor.rows.items[y-1] = tmp;
+    editor.cy--;
+    editor.dirty++;
+}
+
+void builtin_move_line_down()
+{
+    size_t y = CURRENT_Y_POS;
+    if (y == win_main.height-1) return;
+    Row tmp = editor.rows.items[y];
+    editor.rows.items[y] = editor.rows.items[y+1];
+    editor.rows.items[y+1] = tmp;
+    editor.cy++;
+    editor.dirty++;
+}
+
+void insert_char_at(Row *row, size_t at, int c)
+{
+    if (at > row->content.count) {
+        size_t padlen = at-row->content.count;
+        for (size_t i = 0; i < padlen; i++)
+            s_push(&row->content, ' ');
+        s_push(&row->content, c);
+    } else {
+        s_insert(&row->content, c, at);
+    }
+}
+
+void execute_command(Command *cmd, CommandArgs *args); // forward declaration
+
+void insert_char(char c)
+{
+    if (editor.in_cmd) {
+        if (c == '\n') {
+            s_push_null(&editor.cmd);
+            char *cmd_str = editor.cmd.items;
+            commands_history_add(cmd_str);
+            editor.in_cmd = false;
+            s_clear(&editor.cmd);
+            editor.cmd_pos = 0;
+
+            Command cmd_from_line = {
+                .name = "command from line",
+                .type = COMMAND_FROM_LINE,
+                .n = 1 // TODO
+            };
+            CommandArgs runtime_args = {0};
+            char *parse_error = better_parse_cmds(cmd_str, &cmd_from_line, &runtime_args, NO_LOCATION);
+            if (parse_error != NULL) {
+                enqueue_message("ERROR: %s", parse_error);
+                free(parse_error);
+            } else {
+                execute_command(&cmd_from_line, &runtime_args);
+            }
+            //free_commands(&cmds); // TODO
+            //free_command_args(&args); // TODO
+        } else {
+            da_insert(&editor.cmd, c, editor.cmd_pos);
+            editor.cmd_pos++;
+        }
+        return;
+    }
+
+    size_t y = CURRENT_Y_POS;
+    size_t x = CURRENT_X_POS;
+
+    if (c == '\n') {
+        if (y == editor.rows.count) {
+            Row newrow = {0};
+            da_push(&editor.rows, newrow);
+        } else {
+            Row *row = CURRENT_ROW;
+            if (x >= row->content.count) x = row->content.count;
+            if (x == 0) {
+                Row newrow = {0};
+                da_insert(&editor.rows, newrow, y);
+            } else {
+                /* We are in the middle of a line. Split it between two rows. */
+                Row newrow = {0};
+                s_push_str(&newrow.content, row->content.items+x, row->content.count-x);
+                da_insert(&editor.rows, newrow, y+1);
+                row->content.count = x;
+            }
+        }
+        if (editor.cy == win_main.height-1) editor.offset++;
+        else editor.cy++;
+        editor.cx = 0;
+    } else {
+        if (y >= editor.rows.count) {
+            while (editor.rows.count <= y) {
+                Row newrow = {0};
+                da_push(&editor.rows, newrow);
+            }
+        }
+        insert_char_at(CURRENT_ROW, x, c);
+        editor.cx++;
+    }
+    editor.dirty++;
+}
+
+void builtin_insert(Command *cmd, CommandArgs *args)
+{
+    if (!expect_n_arguments(cmd, args, 1)) return;
+    char *str = args->items[0].string_value;
+    size_t len = strlen(str);
+    for (size_t j = 0; j < len; j++) {
+        insert_char(str[j]);
+    }
+}
+
+void builtin_date(Command *cmd, CommandArgs *args)
+{
+    (void)cmd;
+    (void)args;
+
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    char date[64];
+    // TODO: error message if it fails, not an assert
+    assert(strftime(date, sizeof(date), "%c", tm));
+    log_this("%s", date);
+    for (size_t i = 0; i < strlen(date); i++) {
+        insert_char(date[i]);
+    }
+}
+
+void builtin_goto_line(Command *cmd, CommandArgs *args)
+{
+    if (!expect_n_arguments(cmd, args, 1)) return;
+    size_t line = args->items[0].uint_value;
+    enqueue_message("TODO: goto line %zu", line);
+}
+
+int read_key(); // Forward declaration
 void load_config()
 {
     char *home = getenv("HOME");
@@ -866,32 +1212,39 @@ void load_config()
 
     // commands initialization
     commands = (Commands){0};
-    static_assert(BUILTIN_CMDS_COUNT == 13, "Add all builtin commands in commands");
-    add_builtin_command(SAVE,              BUILTIN_SAVE,              (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
-    add_builtin_command(QUIT,              BUILTIN_QUIT,              (CommandArgs){0});
-    add_builtin_command(SAVE_AND_QUIT,     BUILTIN_SAVE_AND_QUIT,     (CommandArgs){0}); // TODO: argomento per salvare il file con un nome
-    add_builtin_command(FORCE_QUIT,        BUILTIN_FORCE_QUIT,        (CommandArgs){0});
-    add_builtin_command(MOVE_CURSOR_UP,    BUILTIN_MOVE_CURSOR_UP,    (CommandArgs){0});
-    add_builtin_command(MOVE_CURSOR_DOWN,  BUILTIN_MOVE_CURSOR_DOWN,  (CommandArgs){0});
-    add_builtin_command(MOVE_CURSOR_LEFT,  BUILTIN_MOVE_CURSOR_LEFT,  (CommandArgs){0});
-    add_builtin_command(MOVE_CURSOR_RIGHT, BUILTIN_MOVE_CURSOR_RIGHT, (CommandArgs){0});
-    add_builtin_command(MOVE_LINE_UP,      BUILTIN_MOVE_LINE_UP,      (CommandArgs){0});
-    add_builtin_command(MOVE_LINE_DOWN,    BUILTIN_MOVE_LINE_DOWN,    (CommandArgs){0});
+    static_assert(BUILTIN_CMDS_COUNT == 14, "Add all builtin commands in commands");
+    add_builtin_command(SAVE,              BUILTIN_SAVE,              builtin_save,              NULL);
+    add_builtin_command(QUIT,              BUILTIN_QUIT,              builtin_quit,              NULL);
+    add_builtin_command(SAVE_AND_QUIT,     BUILTIN_SAVE_AND_QUIT,     builtin_save_and_quit,     NULL);
+    add_builtin_command(FORCE_QUIT,        BUILTIN_FORCE_QUIT,        builtin_force_quit,        NULL);
 
-    CommandArgs cmd_args = {0};
-    CommandArg cmd_arg;
+    CommandArgs baked_args = {0};
+    da_push(&baked_args, make_command_arg_int(0,  0, "x"));
+    da_push(&baked_args, make_command_arg_int(-1, 1, "y"));
+    add_builtin_command(MOVE_CURSOR_UP, BUILTIN_MOVE_CURSOR_UP, builtin_move_cursor, &baked_args);
 
-    cmd_arg = (CommandArg){.value = NULL, .type=ARG_STRING, .needed=true};
-    da_push(&cmd_args, cmd_arg);
-    add_builtin_command(INSERT, BUILTIN_INSERT, cmd_args);
-    da_clear(&cmd_args);
+    da_clear(&baked_args);
+    da_push(&baked_args, make_command_arg_int(0, 0, "x"));
+    da_push(&baked_args, make_command_arg_int(1, 1, "y"));
+    add_builtin_command(MOVE_CURSOR_DOWN, BUILTIN_MOVE_CURSOR_DOWN, builtin_move_cursor, &baked_args);
 
-    add_builtin_command(DATE, BUILTIN_DATE, (CommandArgs){0});
+    da_clear(&baked_args);
+    da_push(&baked_args, make_command_arg_int(-1, 0, "x"));
+    da_push(&baked_args, make_command_arg_int(0,  1, "y"));
+    add_builtin_command(MOVE_CURSOR_LEFT, BUILTIN_MOVE_CURSOR_LEFT, builtin_move_cursor, &baked_args);
 
-    cmd_arg = (CommandArg){.value = NULL, .type=ARG_UINT, .needed=true};
-    da_push(&cmd_args, cmd_arg);
-    add_builtin_command(GOTO_LINE, BUILTIN_GOTO_LINE, cmd_args);
-    da_clear(&cmd_args);
+    da_clear(&baked_args);
+    da_push(&baked_args, make_command_arg_int(1, 0, "x"));
+    da_push(&baked_args, make_command_arg_int(0, 1, "y"));
+    add_builtin_command(MOVE_CURSOR_RIGHT, BUILTIN_MOVE_CURSOR_RIGHT, builtin_move_cursor, &baked_args);
+
+    add_builtin_command(MOVE_LINE_UP,      BUILTIN_MOVE_LINE_UP,      builtin_move_line_up,      NULL);
+    add_builtin_command(MOVE_LINE_DOWN,    BUILTIN_MOVE_LINE_DOWN,    builtin_move_line_down,    NULL);
+    add_builtin_command(INSERT,            BUILTIN_INSERT,            builtin_insert,            NULL);
+    add_builtin_command(DATE,              BUILTIN_DATE,              builtin_date,              NULL);
+    add_builtin_command(GOTO_LINE,         BUILTIN_GOTO_LINE,         builtin_goto_line,         NULL);
+
+    // TODO: free baked_args
 
     Location loc = {0};
     ssize_t res; 
@@ -951,17 +1304,18 @@ void load_config()
                 loc.col += strlen(cmd_name) + 1;
 
                 char *cmds = colon+1;
-                Commands cmd_def = {0};
+                Command user_defined_cmd = {
+                    .name = strdup(cmd_name),
+                };
                 CommandArgs cmd_args = {0};
-                // TODO: WIP
-                //char *parse_error = parse_cmds(cmds, &cmd_def, &cmd_args, &loc);
-                char *parse_error = better_parse_cmds(cmds, &cmd_def, &cmd_args, &loc);
+                char *parse_error = better_parse_cmds(cmds, &user_defined_cmd, &cmd_args, &loc);
                 if (parse_error != NULL) {
                     s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
                     s_push_fstr(&config_log, "ERROR: %s\n", parse_error);
                     free(parse_error);
                 } else {
-                    add_user_command(cmd_name, cmd_args, cmd_def);
+                    // TODO: che ci faccio con cmd_args?
+                    add_user_command(user_defined_cmd);
                     s_push_fstr(&config_log, "added command `%s`\n", cmd_name);
                 }
             }
@@ -1638,58 +1992,13 @@ bool open_file(char *filename)
     return true;
 }
 
-void builtin_move_cursor_up() 
-{
-    if (editor.cy == 0 && editor.page != 0) {
-        editor.offset--;
-        // TODO: deve cambiare anche la pagina, ma come?
-    }
-    if (editor.cy - N_OR_DEFAULT(1) > 0) editor.cy -= N_OR_DEFAULT(1);
-    else editor.cy = 0;
-}
-
-void builtin_move_cursor_down()
-{ 
-    //if ((editor.offset+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.offset+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'offset in questo caso
-    if (editor.cy == win_main.height-1 && editor.page != N_PAGES-1) {
-        editor.offset++;
-        // TODO: deve cambiare anche la pagina, ma come?
-    }
-    if (editor.cy+N_OR_DEFAULT(1) < win_main.height-1) editor.cy += N_OR_DEFAULT(1);
-    else editor.cy = win_main.height-1;
-    //if (editor.offset < editor.rows.count-N_OR_DEFAULT(0)-1) editor.offset += N_OR_DEFAULT(1); 
-    //else editor.offset = editor.rows.count-1;
-}
-
-void builtin_move_cursor_left()
-{
-    if (editor.in_cmd) {
-        if (editor.cmd_pos > 0) editor.cmd_pos -= 1;
-        else editor.cmd_pos = 0;
-    } else {
-        if (editor.cx > 0) editor.cx -= 1;
-        else editor.cx = 0;
-    }
-}
-
-void builtin_move_cursor_right()
-{
-    if (editor.in_cmd) {
-        if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos += 1;
-        else editor.cmd_pos = editor.cmd.count;
-    } else {
-        if (editor.cx < win_main.width-1) editor.cx += 1;
-        else editor.cx = win_main.width-1;
-    }
-}
-
 void scroll_up() // TODO: cy va oltre
 { 
     if (editor.offset > N_OR_DEFAULT(0)) {
         editor.offset -= N_OR_DEFAULT(1);
         editor.cy += N_OR_DEFAULT(1);
     } else editor.offset = 0;
-}             
+}
 
 void scroll_down() // TODO: cy fa cose strane
 {
@@ -1773,235 +2082,40 @@ void itoa(int n, char *buf)
     for (int i = 0; i < len; i++) buf[i] = tmp[len-i-1];
 }
 
-bool save(void)
-{
-    String save_buf = {0};
-    da_foreach(editor.rows, Row, row) {
-        s_push_str(&save_buf, row->content.items, row->content.count);
-        s_push(&save_buf, '\n');
-    }
-
-    // TODO: make the user decide, in the status line, the name of the file if not set
-    // - probabilmente devo fare un sistema che permetta di cambiare l'inizio della command line (ora e' sempre Command:) e poi fare cose diverse una volta che si e' premuto ENTER
-    int fd = open(editor.filename, O_RDWR|O_CREAT, 0644);
-    if (fd == -1) goto writeerr;
-
-    /* Use truncate + a single write(2) call in order to make saving
-     * a bit safer, under the limits of what we can do in a small editor. */
-    ssize_t len = save_buf.count;
-    if (ftruncate(fd, len) == -1) goto writeerr;
-    if (write(fd, save_buf.items, len) != len) goto writeerr;
-
-    close(fd);
-    s_free(&save_buf);
-    editor.dirty = 0;
-    enqueue_message("%zu bytes written on disk", len);
-    return 0;
-
-writeerr:
-    s_free(&save_buf);
-    if (fd != -1) close(fd);
-    enqueue_message("Can't save! I/O error: %s", strerror(errno));
-    return 1;
-}
-
-_Noreturn void quit() { exit(0); }
-
-bool can_quit(void)
-{
-    if (!editor.dirty || editor.current_quit_times == 0) return true;
-
-    // TODO: set higher priority messages that overwrite the current and then restore them after msg_lifetime secs
-    // - da pensare 
-    enqueue_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
-    editor.current_quit_times--;
-    return false;
-}
-
-void insert_char_at(Row *row, size_t at, int c)
-{
-    if (at > row->content.count) {
-        size_t padlen = at-row->content.count;
-        for (size_t i = 0; i < padlen; i++)
-            s_push(&row->content, ' ');
-        s_push(&row->content, c);
-    } else {
-        s_insert(&row->content, c, at);
-    }
-}
-
-void builtin_move_line_up()
-{
-    size_t y = CURRENT_Y_POS;
-    if (y == 0) return;
-    Row tmp = editor.rows.items[y];
-    editor.rows.items[y] = editor.rows.items[y-1];
-    editor.rows.items[y-1] = tmp;
-    editor.cy--;
-    editor.dirty++;
-}
-
-void builtin_move_line_down()
-{
-    size_t y = CURRENT_Y_POS;
-    if (y == win_main.height-1) return;
-    Row tmp = editor.rows.items[y];
-    editor.rows.items[y] = editor.rows.items[y+1];
-    editor.rows.items[y+1] = tmp;
-    editor.cy++;
-    editor.dirty++;
-}
-
-void execute_cmd(const Command *cmd); // forward declaration
-
-void insert_char(char c)
-{
-    if (editor.in_cmd) {
-        if (c == '\n') {
-            s_push_null(&editor.cmd);
-            char *cmd_str = editor.cmd.items;
-            commands_history_add(cmd_str);
-            editor.in_cmd = false;
-            s_clear(&editor.cmd);
-            editor.cmd_pos = 0;
-
-            Command cli_cmd = {
-                .name = "cli command",
-                .type = CLI,
-                .n = 1 // TODO
-            };
-            Commands subcmds = {0};
-            CommandArgs args = {0};
-            char *parse_error = better_parse_cmds(cmd_str, &subcmds, &args, NO_LOCATION);
-            //char *parse_error = parse_cmds(cmd_str, &subcmds, &args, NULL);
-            if (parse_error != NULL) {
-                enqueue_message("ERROR: %s", parse_error);
-                free(parse_error);
-            } else {
-                cli_cmd.subcmds = subcmds;
-                cli_cmd.args = args;
-                execute_cmd(&cli_cmd);
-            }
-            //free_commands(&cmds); // TODO
-        } else {
-            da_insert(&editor.cmd, c, editor.cmd_pos);
-            editor.cmd_pos++;
-        }
-        return;
-    }
-
-    size_t y = CURRENT_Y_POS;
-    size_t x = CURRENT_X_POS;
-
-    if (c == '\n') {
-        if (y == editor.rows.count) {
-            Row newrow = {0};
-            da_push(&editor.rows, newrow);
-        } else {
-            Row *row = CURRENT_ROW;
-            if (x >= row->content.count) x = row->content.count;
-            if (x == 0) {
-                Row newrow = {0};
-                da_insert(&editor.rows, newrow, y);
-            } else {
-                /* We are in the middle of a line. Split it between two rows. */
-                Row newrow = {0};
-                s_push_str(&newrow.content, row->content.items+x, row->content.count-x);
-                da_insert(&editor.rows, newrow, y+1);
-                row->content.count = x;
-            }
-        }
-        if (editor.cy == win_main.height-1) editor.offset++;
-        else editor.cy++;
-        editor.cx = 0;
-    } else {
-        if (y >= editor.rows.count) {
-            while (editor.rows.count <= y) {
-                Row newrow = {0};
-                da_push(&editor.rows, newrow);
-            }
-        }
-        insert_char_at(CURRENT_ROW, x, c);
-        editor.cx++;
-    }
-    editor.dirty++;
-}
-
-void builtin_insert(const Command *cmd)
-{
-    if (!expect_n_arguments(cmd, 1)) return;
-    char *str = cmd->args.items[0].value;
-    size_t len = strlen(str);
-    for (size_t j = 0; j < len; j++) {
-        insert_char(str[j]);
-    }
-}
-
-void builtin_date(void)
-{
-    time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
-    char date[64];
-    // TODO: error message if it fails, not an assert
-    assert(strftime(date, sizeof(date), "%c", tm));
-    log_this("%s", date);
-    for (size_t i = 0; i < strlen(date); i++) {
-        insert_char(date[i]);
-    }
-}
-
-void builtin_goto_line(const Command *cmd)
-{
-    if (!expect_n_arguments(cmd, 1)) return;
-    size_t line = *(size_t *)cmd->args.items[0].value;
-    enqueue_message("TODO: goto line %zu", line);
-}
-
-void execute_cmd(const Command *cmd, CommandArgs *runtime_args)
+void execute_command(Command *cmd, CommandArgs *runtime_args)
 {
     log_this("Executing command `%s`", cmd->name);
 
-    // TODO: adesso dovrebbe bastare questo
-    CommandArgs final_args = {0};
-    da_append_many(&final_args, cmd->baked_args);
-    if (runtime_args) args_append(&final_args, runtime_args);
-    if (cmd->execute) cmd->execute(&final_args);
-    free(final_args.items);
-
-    //static_assert(BUILTIN_CMDS_COUNT == 13, "Execute all commands in execute_cmd");
-    //for (size_t i = 0; i < cmd->n; i++ ) {
-    //    switch (cmd->type)
-    //    {
-    //        case BUILTIN_SAVE             : save();                      break;
-    //        case BUILTIN_QUIT             : if (can_quit()) quit();      break;
-    //        case BUILTIN_SAVE_AND_QUIT    : save(); quit();              break;
-    //        case BUILTIN_FORCE_QUIT       : quit();                      break;
-    //        case BUILTIN_MOVE_CURSOR_UP   : builtin_move_cursor_up();    break;
-    //        case BUILTIN_MOVE_CURSOR_DOWN : builtin_move_cursor_down();  break; 
-    //        case BUILTIN_MOVE_CURSOR_LEFT : builtin_move_cursor_left();  break;
-    //        case BUILTIN_MOVE_CURSOR_RIGHT: builtin_move_cursor_right(); break;
-    //        case BUILTIN_MOVE_LINE_UP     : builtin_move_line_up();      break;
-    //        case BUILTIN_MOVE_LINE_DOWN   : builtin_move_line_down();    break;
-    //        case BUILTIN_INSERT           : builtin_insert(cmd);         break;
-    //        case BUILTIN_DATE             : builtin_date();              break;
-    //        case BUILTIN_GOTO_LINE        : builtin_goto_line(cmd);      break;
-    //        case UNKNOWN: enqueue_message("Unknown command `%s`", cmd->name); break;
-    //        case BUILTIN_CMDS_COUNT:
-    //            print_error_and_exit("Unreachable command type `BUILTIN_CMDS_COUNT` in execute_cmd\n");
-    //        case CLI:
-    //            da_foreach(cmd->subcmds, Command, subcmd)
-    //                execute_cmd(subcmd);
-    //            break;
-    //        case USER_DEFINED:
-    //        default:
-    //            if (cmd->type >= USER_DEFINED && cmd->type < USER_DEFINED + USER_CMDS_COUNT) {
-    //                Command *user_cmd = &commands.items[get_command_index(cmd)];
-    //                da_foreach(user_cmd->subcmds, Command, subcmd)
-    //                    execute_cmd(subcmd);
-    //                break;
-    //            } else print_error_and_exit("Unreachable command type %u in execute_cmd\n", cmd->type);
-    //    }
-    //}
+    if (cmd->type >= 0 && cmd->type < BUILTIN_CMDS_COUNT) {
+        CommandArgs final_args = {0}; // TODO: maybe it can be just an array
+        for (size_t i = 0; i < cmd->baked_args.count; i++) {
+            log_this("baked argument %zu", i);
+            CommandArg arg = cmd->baked_args.items[i];
+            if (arg.type == ARG_PLACEHOLDER) {
+                if (runtime_args && arg.placeholder_index < runtime_args->count) {
+                    da_push(&final_args, runtime_args->items[arg.placeholder_index]);
+                } else {
+                    enqueue_message("ERROR: Missing argument $%zu for %s", arg.index, cmd->name);
+                    return; 
+                }
+            } else da_push(&final_args, arg);
+        }
+        if (cmd->baked_args.count == 0 && runtime_args)
+            da_push_many(&final_args, cmd->baked_args.items, cmd->baked_args.count);
+        log_this("execute %p", cmd->execute);
+        assert(cmd->execute);
+        for (size_t i = 0; i < cmd->n; i++)
+            cmd->execute(cmd, &final_args);
+        if (final_args.count > 0) free(final_args.items);
+    } else if (cmd->type == COMMAND_FROM_LINE || cmd->type >= USER_DEFINED) {
+        da_foreach(cmd->subcmds, Command, subcmd)
+            execute_command(subcmd, runtime_args);
+    } else if (cmd->type == UNKNOWN) {
+        enqueue_message("Unknown command `%s`", cmd->name);
+    } else {
+        print_error_and_exit("Unreachable command `%s` (%u) in execute_command\n",
+                cmd->name ? cmd->name : "", cmd->type);
+    }
 }
 
 void insert_newline_and_keep_pos()
@@ -2123,10 +2237,10 @@ void process_pressed_key(void)
             if (set_N(key)) has_inserted_number = true;
             break;
 
-        case ALT_k: N_TIMES builtin_move_cursor_up();    break;
-        case ALT_j: N_TIMES builtin_move_cursor_down();  break;
-        case ALT_h: N_TIMES builtin_move_cursor_left();  break;
-        case ALT_l: N_TIMES builtin_move_cursor_right(); break;
+        case ALT_k: N_TIMES move_cursor_up();    break;
+        case ALT_j: N_TIMES move_cursor_down();  break;
+        case ALT_h: N_TIMES move_cursor_left();  break;
+        case ALT_l: N_TIMES move_cursor_right(); break;
 
         case ALT_K: move_cursor_begin_of_screen(); break;
         case ALT_J: move_cursor_end_of_screen();   break;
@@ -2169,7 +2283,7 @@ void process_pressed_key(void)
             }
             break;
 
-        case ENTER: // TODO: se si e' in_cmd si esegue execute_cmd (che fa anche il resto)
+        case ENTER: // TODO: se si e' in_cmd si esegue execute_command (che fa anche il resto)
             N_TIMES insert_char('\n');
             break;
 
