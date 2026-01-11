@@ -15,6 +15,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <ncurses.h>
+#include <stddef.h>
 
 #define STRINGS_IMPLEMENTATION
 #include "strings.h"
@@ -521,145 +522,10 @@ void free_commands(Commands *cmds)
 
 typedef struct
 {
+    char *path;
     size_t row;
     size_t col;
 } Location;
-
-//char *parse_cmds(char *cmds_str, Commands *cmds, CommandArgs *cmd_args, Location *loc)
-//{
-//    *cmds = (Commands){0};
-//    char *saveptr_cmds;
-//    char *cmd_str = strtok_r(cmds_str, " \t", &saveptr_cmds);
-//    while (cmd_str != NULL) {
-//        Command cmd = {0};
-//
-//        if (isdigit(*cmd_str)) {
-//            char *end_of_n;
-//            errno = 0;
-//            long n = strtol(cmd_str, &end_of_n, 10);
-//            if (loc) loc->col += end_of_n - cmd_str;
-//            if (n <= 0) {
-//                char *error = malloc(sizeof(char)*256);
-//                sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n);
-//                return error;
-//            } else cmd.n = n;
-//            cmd_str = end_of_n;
-//        } else cmd.n = 1;
-//
-//        Strings args = {0};
-//        *cmd_args = (CommandArgs){0};
-//        char *args_str = strchr(cmd_str, '.');
-//        if (args_str != NULL) {
-//            *args_str = '\0';
-//            args_str++;
-//            if (!strchr(args_str, ',')) {
-//                da_push(&args, strdup(args_str));
-//            } else {
-//                char *saveptr_args;
-//                char *arg = strtok_r(args_str, ",", &saveptr_args);
-//                while (arg != NULL) { // TODO: qui dovrei riportare errori del tipo: "cmd.arg1,"
-//                                      // - si presuppone che ci sia un altro argomento che in realta' non c'e'
-//                                      // - forse non posso usare strtok
-//                    da_push(&args, strdup(arg));
-//                    arg = strtok_r(NULL, ",", &saveptr_args);
-//                }
-//            }
-//        }
-//        cmd.type = parse_cmdtype(cmd_str);
-//        if (cmd.type == UNKNOWN) {
-//            char *error = malloc(sizeof(char)*256);
-//            // TODO: track location
-//            sprintf(error, "unknown command `%s`", cmd_str);
-//            return error;
-//        }
-//
-//        int index = get_command_index(&cmd);
-//        if (index == -1) {
-//            print_error_and_exit("TODO: invalid command\n");
-//        }
-//        const Command *ref_cmd = &commands.items[index];
-//        cmd.name = ref_cmd->name;
-//        if (cmd_args) {
-//            cmd.args = (CommandArgs){0};
-//            CommandArg *ref_arg;
-//            char *arg;
-//            for (size_t i = 0; i < args.count; i++) {
-//                ref_arg = &ref_cmd->args.items[i];
-//                arg = args.items[i];
-//                if (ref_arg->needed) {
-//                    CommandArg actual_arg = *ref_arg;
-//                    switch (ref_arg->type)
-//                    {
-//                        case ARG_UINT: {
-//                            size_t value = atoi(arg);
-//                            if (value == 0 && !streq(arg, "0")) {
-//                                char *error = malloc(sizeof(char)*256);
-//                                // TODO: track location
-//                                sprintf(error, "expecting a number greater than 0, but got `%s`", arg);
-//                                return error;
-//                            }
-//                            actual_arg.value = malloc(sizeof(size_t)); // NOTE: rember to free
-//                            *(size_t *)actual_arg.value = value;
-//                        } break;
-//                        case ARG_STRING:
-//                            // TODO: allora, devo farlo a mano e devo prima cercare negli argomenti se ce ne sono ancora (caso "ciao,come,stai"), altrimenti continuo con la line (caso "ciao come stai"), poi salvo la fine in saveptr_cmds e da li' si continua con gli altri comandi
-//                            if (*arg == '\"') {
-//                                size_t arglen = strlen(arg);
-//                                if (arglen == 1 || arg[arglen-1] != '\"') {
-//                                    String str = {0};
-//                                    s_push_cstr(&str, arg);
-//                                    size_t j;
-//                                    bool done = false;
-//                                    for (j = i+1; j < args.count; j++) {
-//                                        if (strchr(args.items[j], '\"')) {
-//                                            char *popped_arg = args.items[j];
-//                                            da_remove(&args, j);
-//                                            s_push(&str, ',');
-//                                            s_push_cstr(&str, popped_arg);
-//                                            done = true;
-//                                            break;
-//                                        }
-//                                    }
-//                                    if (!done && j >= args.count) { // TODO: search after all the arguments char by char
-//                                        char *rest_of_str = saveptr_cmds;
-//                                        size_t len = strlen(rest_of_str);
-//                                        char *end = rest_of_str+len-1;
-//                                        while (isspace(*end)) end--;
-//                                        *(end+1) = '\0';
-//                                        size_t k = 0;
-//                                        while (k < len && *rest_of_str != '\"') {
-//                                            s_push(&str, *rest_of_str);
-//                                            rest_of_str++;
-//                                        }
-//                                        if (k >= len) {
-//                                            // TODO: track location
-//                                            return strdup("unclosed quoted string");
-//                                        } else s_push(&str, '\"');
-//                                        saveptr_cmds = rest_of_str+1;
-//                                    }
-//                                    s_push_null(&str);
-//                                    arg = str.items;
-//                                }
-//                                arg[strlen(arg)-1] = '\0';
-//                                arg++;
-//                            }
-//                            // TODO: add support for char '\n' in string arg
-//                            // TODO: add support for char '"' in string arg
-//                            actual_arg.value = strdup(arg); // NOTE: rember to free
-//                            break;
-//                        default:
-//                            print_error_and_exit("Unreachable command arg type %u in parse_cmds\n", ref_arg->type);
-//                    }
-//                    da_push(&cmd.args, actual_arg);
-//                } else da_push(&cmd.args, *ref_arg);
-//            }
-//        }
-//
-//        da_push(cmds, cmd);
-//        cmd_str = strtok_r(NULL, " \t", &saveptr_cmds);
-//    }
-//    return NULL;
-//}
 
 size_t trim_left(char **str)
 {
@@ -689,8 +555,240 @@ void trim(char **str)
     ARG_LIST -> ARG ARG_LIST | epsilon
 */
 
+char *read_file(char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    rewind(f);
+    char *content = malloc(len + 1);
+    fread(content, len, 1, f);
+    fclose(f);
+    content[len] = '\0';
+    return content;
+}
+
+typedef enum
+{
+    TOKEN_NAME = 256,
+    TOKEN_NUMBER,
+    TOKEN_STRING,
+
+    TOKEN_EOF
+} TokenType;
+
+typedef struct
+{
+    TokenType type;
+    union {
+        int number_value;
+        char *string_value;
+    };
+    Location loc;
+} Token;
+
+void token_print(Token token)
+{
+    char *path = token.loc.path;
+    size_t col = token.loc.col + 1;
+    size_t row = token.loc.row + 1;
+
+    if (token.type >= 0 && token.type <= 255) {
+        if (isprint(token.type)) log_this("%s:%zu:%zu: char: '%c'", path, row, col, token.type);
+        else                     log_this("%s:%zu:%zu: control char: '%d'", path, row, col, token.type);
+    } else {
+        switch (token.type)
+        {
+            case TOKEN_NAME:   log_this("%s:%zu:%zu: name: `%s`", path, row, col, token.string_value); break;
+            case TOKEN_NUMBER: log_this("%s:%zu:%zu: number: `%d`", path, row, col, token.number_value); break;
+            case TOKEN_STRING: log_this("%s:%zu:%zu: string: \"%s\"", path, row, col, token.string_value); break;
+            case TOKEN_EOF:    log_this("EOF"); break;
+            default: print_error_and_exit("Unreachable");
+        }
+    }
+}
+
+typedef struct
+{
+    Token *items;
+    size_t count;
+    size_t capacity;
+} Tokens;
+
+typedef struct
+{
+    char *str;
+    Location loc;
+    Token token;
+} Lexer;
+
+Lexer lexer_create(char *path)
+{
+    Lexer l = {0};
+    l.loc.path = path;
+    l.str = read_file(path);
+    return l;
+}
+
+void lexer_trim_left(Lexer *l)
+{
+    if (!l->str) return;
+    while (isspace(*l->str)) {
+        if (*l->str == '\n') {
+            l->loc.col = 0;
+            l->loc.row++;
+        } else l->loc.col++;
+        l->str++;
+    }
+}
+
+void lexer_skip_comment(Lexer *l)
+{
+    while (l->str && *l->str && *l->str != '\n') {
+        l->str++;
+        l->loc.col++;
+    }
+    if (*l->str == '\n') {
+        l->loc.col = 0;
+        l->loc.row++;
+    }
+}
+
+bool lexer_string(Lexer *l)
+{
+    l->str++;
+    l->loc.col++;
+    l->token.type = TOKEN_STRING;
+    char *begin = l->str;
+    char *end = strchr(begin, '"');
+    if (end == NULL) return false;
+    ptrdiff_t len = end - begin;
+    l->token.string_value = malloc(sizeof(char)*len + 1);
+    strncpy(l->token.string_value, begin, len);
+    l->token.string_value[len] = '\0';
+    l->str = end;
+    l->loc.col += len;
+    log_this("Lexed string: \"%s\"", l->token.string_value);
+    return true;
+}
+
+bool lexer_next(Lexer *l)
+{
+    if (!l->str) return false;
+    lexer_trim_left(l);
+
+    char c = *l->str;
+    if (c == '\0') return false;
+
+    l->token.loc = l->loc;
+
+    if (c == '/') {
+        l->str++;
+        char second = *l->str;
+        if (second != '/') {
+            l->loc.col++;
+            l->token.type = c;
+        } else {
+            l->str++;
+            l->loc.col += 2;
+            lexer_skip_comment(l);
+            return lexer_next(l);
+        }
+    } else if (isalpha(c) || c == '_') {
+        char *name = l->str;
+        size_t len = 0;
+        while (isalnum(c) || c == '_') {
+            l->str++;
+            len++;
+            c = *l->str;
+        }
+        l->token.type = TOKEN_NAME;
+        l->loc.col += len;
+        l->token.string_value = malloc(sizeof(char)*len + 1);
+        strncpy(l->token.string_value, name, len);
+        l->token.string_value[len] = '\0';
+    } else if (isdigit(c) || c == '-') {
+        char *end;
+        long n = strtol(l->str, &end, 10);
+        l->token.type = TOKEN_NUMBER;
+        l->token.number_value = n;
+        l->loc.col += end - l->str;
+        l->str = end;
+    } else if (c == '"') {
+        lexer_string(l);
+    } else {
+        l->token.type = c;
+        l->str++;
+        l->loc.col++;
+    }
+    return true;
+}
+
+Token lexer_get_current_token(Lexer *l)
+{
+    Token token = l->token;
+    token.loc.path = strdup(l->loc.path);
+
+    if (token.type >= 0 && token.type <= 255) return token;
+
+    switch (token.type)
+    {
+    case TOKEN_NUMBER:
+    case TOKEN_EOF:
+        break;
+
+    case TOKEN_NAME:
+    case TOKEN_STRING:
+        token.string_value = strdup(l->token.string_value);
+        break;
+
+    default: print_error_and_exit("Unreachable token type %u", token.type);
+    }
+
+    return token;
+}
+
+void free_token(Token *token)
+{
+    if (token->loc.path) free(token->loc.path);
+    switch (token->type)
+    {
+    case TOKEN_NAME:
+    case TOKEN_STRING:
+        free(token->string_value);
+        break;
+
+    case TOKEN_NUMBER:
+    case TOKEN_EOF:
+    default: {}
+    }
+}
+
+void lexer_free_current_token(Lexer *l)
+{
+    l->token.loc.path = NULL;
+    free_token(&l->token);
+}
+
+Tokens lex_file(char *path)
+{
+    log_this("Lexing file `%s`...", path);
+    Lexer lex = lexer_create(path); 
+    Tokens tokens = {0};
+    while (lexer_next(&lex)) {
+        Token token = lexer_get_current_token(&lex);
+        da_push(&tokens, token);
+        token_print(token);
+        lexer_free_current_token(&lex);
+    }
+    Token eof = { .type = TOKEN_EOF };
+    da_push(&tokens, eof);
+    return tokens;
+}
+
 #define NO_LOCATION NULL
-char *better_parse_cmds(char *cmds_str, Command *cmd, CommandArgs *args, Location *loc)
+char *parse_commands(char *cmds_str, Command *cmd, CommandArgs *args, Location *loc)
 {
     (void)args; // TODO
 
@@ -839,9 +937,25 @@ typedef struct
 {
     const char *name;
     FieldType type;
-    const void *ptr;
-    const char **valid_values;
-    const void *thefault;
+    union {
+        struct { // FIELD_BOOL
+            bool *bool_ptr;
+            bool bool_default;
+        };
+        struct { // FIELD_UINT
+            size_t *uint_ptr;   
+            size_t uint_default;   
+        };
+        struct { // FIELD_STRING
+            char **string_ptr;
+            char *string_default;
+        };
+        struct { // FIELD_LIMITED_STRING
+            char **limited_string_ptr;
+            char *limited_string_default;
+            char **limited_string_valid_values;
+        };
+    };
 } ConfigField;
 
 typedef struct
@@ -851,23 +965,46 @@ typedef struct
     size_t capacity;
 } ConfigFields;
 
-ConfigField create_field(const char *name, FieldType type, void *ptr, const char **valid_values, const void *thefault)
+ConfigField create_field_bool(char *name, bool *ptr, bool thefault)
 {
     return (ConfigField){
-        .name=name,
-        .type=type,
-        .ptr=ptr,
-        .valid_values = valid_values,
-        .thefault=thefault
+        .name = name,
+        .type = FIELD_BOOL,
+        .bool_ptr = ptr,
+        .bool_default = thefault
     };
 }
 
-#define ADD_CONFIG_FIELD(name, type, valid_values)                                \
-    do {                                                                          \
-        ConfigField __field = create_field(#name, (type),                         \
-                (void *)&config.name, (valid_values), (void *)&default_ ## name); \
-        da_push(&remaining_fields, __field);                                      \
-    } while (0);
+ConfigField create_field_uint(char *name, size_t *ptr, size_t thefault)
+{
+    return (ConfigField){
+        .name = name,
+        .type = FIELD_UINT,
+        .uint_ptr = ptr,
+        .uint_default = thefault
+    };
+}
+
+ConfigField create_field_string(char *name, char **ptr, char *thefault)
+{
+    return (ConfigField){
+        .name = name,
+        .type = FIELD_STRING,
+        .string_ptr = ptr,
+        .string_default = strdup(thefault)
+    };
+}
+
+ConfigField create_field_limited_string(char *name, char **ptr, const char *thefault, const char **valid_values)
+{
+    return (ConfigField){
+        .name = name,
+        .type = FIELD_LIMITED_STRING,
+        .limited_string_ptr = ptr,
+        .limited_string_default = strdup(thefault),
+        .limited_string_valid_values = valid_values
+    };
+}
 
 typedef enum { LN_NO, LN_ABS, LN_REL } ConfigLineNumbers;
 
@@ -1069,7 +1206,7 @@ void insert_char(char c)
                 .n = 1 // TODO
             };
             CommandArgs runtime_args = {0};
-            char *parse_error = better_parse_cmds(cmd_str, &cmd_from_line, &runtime_args, NO_LOCATION);
+            char *parse_error = parse_commands(cmd_str, &cmd_from_line, &runtime_args, NO_LOCATION);
             if (parse_error != NULL) {
                 enqueue_message("ERROR: %s", parse_error);
                 free(parse_error);
@@ -1168,6 +1305,8 @@ void load_config()
     const char *default_line_numbers = "no";
 
     const char *valid_values_field_bool[] = {"true", "false", NULL};
+    (void)valid_values_field_bool;
+
     const char *valid_values_line_numbers[] = {"no", "absolute", "relative", NULL};
 
     String config_log = {0};
@@ -1198,9 +1337,11 @@ void load_config()
 
     ConfigFields remaining_fields = {0};
 
-    ADD_CONFIG_FIELD(quit_times,   FIELD_UINT, NULL);
-    ADD_CONFIG_FIELD(msg_lifetime, FIELD_UINT, NULL);
-    ADD_CONFIG_FIELD(line_numbers, FIELD_LIMITED_STRING, valid_values_line_numbers);
+    da_push(&remaining_fields, create_field_uint("quit_times", &config.quit_times, default_quit_times));
+    da_push(&remaining_fields, create_field_uint("msg_lifetime", (size_t *)&config.msg_lifetime, default_msg_lifetime));
+    da_push(&remaining_fields, create_field_limited_string("line_numbers", &config.line_numbers, default_line_numbers,
+                valid_values_line_numbers));
+    
     //if (DEBUG) {
     //    for (size_t i = 0; i < remaining_fields.count; i++) {
     //        const ConfigField *field = &remaining_fields.items[i];
@@ -1209,6 +1350,7 @@ void load_config()
     //}
 
     ConfigFields inserted_fields = {0};
+    (void)inserted_fields;
 
     // commands initialization
     commands = (Commands){0};
@@ -1246,207 +1388,232 @@ void load_config()
 
     // TODO: free baked_args
 
-    Location loc = {0};
-    ssize_t res; 
-    size_t len;
-    char *full_line = NULL;
-    while ((res = getline(&full_line, &len, config_file)) != -1) {
-        res--;
-        if (res == 0) {
-            loc.row++;
-            loc.col = 0;
-            continue;
-        }
-        char *line = full_line;
-        line[res] = '\0';
-        loc.col += trim_left(&line);
-        if (res == 0) {
-            loc.row++;
-            loc.col = 0;
-            continue;
-        }
+    Tokens tokens = lex_file(full_config_path);
 
-        char *comment = strstr(line, "//");
-        if (comment != NULL) {
-            if (comment == line) {
-                loc.row++;
-                loc.col = 0;
+    for (size_t i = 0; i < tokens.count; i++) {
+        Token token = tokens.items[i];
+        switch (token.type)
+        {
+        case TOKEN_NAME: {
+            if (i+1 >= tokens.count || tokens.items[i+1].type != '=') {
+                // TODO: report error
                 continue;
-            } else *comment = '\0';
-        }
+            }
+        } break;
 
-        char *colon = NULL;
-        if (*line == '#') {
-            line++;
-            loc.col++;
-            colon = strchr(line, ':');
-            if (colon == NULL) {
-                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                s_push_fstr(&config_log, "ERROR: invalid command, it should be of the form #name: commands...\n");
-            } else {
-                *colon = '\0';
-                char *cmd_name = line;
-                bool already_defined = false;
-                da_enumerate(commands, Command, i, command) {
-                    if (streq(cmd_name, command->name)) {
-                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                        s_push_fstr(&config_log, "ERROR: redeclaration of %s command `%s`\n", 
-                                i < BUILTIN_CMDS_COUNT ? "builtin" : "user defined", cmd_name); 
-                        already_defined = true;
+        case '#': {
+            if (i+1 >= tokens.count || tokens.items[i+1].type != TOKEN_NAME) {
+                // TODO: report erorr
+                continue;
+            }
+            i++;
+            Token command_name_token = tokens.items[i];
+            if (i+1 >= tokens.count || tokens.items[i+1].type != ':') {
+                // TODO: report erorr
+                continue;
+            }
+            i++;
+            if (i+1 >= tokens.count) {
+                // TODO: report error
+            }
+            i++;
+            while (true) {
+                Token t = tokens.items[i];
+                size_t n = 1;
+                if (t.type == TOKEN_NUMBER) {
+                    if (t.number_value <= 0) {
+                        // TODO: report error
                         break;
                     }
-                }
-                if (already_defined) {
-                    loc.col = 0;
-                    loc.row++;
-                    continue;
-                }
-                loc.col += strlen(cmd_name) + 1;
-
-                char *cmds = colon+1;
-                Command user_defined_cmd = {
-                    .name = strdup(cmd_name),
-                };
-                CommandArgs cmd_args = {0};
-                char *parse_error = better_parse_cmds(cmds, &user_defined_cmd, &cmd_args, &loc);
-                if (parse_error != NULL) {
-                    s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                    s_push_fstr(&config_log, "ERROR: %s\n", parse_error);
-                    free(parse_error);
-                } else {
-                    // TODO: che ci faccio con cmd_args?
-                    add_user_command(user_defined_cmd);
-                    s_push_fstr(&config_log, "added command `%s`\n", cmd_name);
-                }
-            }
-        } else if ((colon = strchr(line, ':')) != NULL) {
-            *colon = '\0';
-            char *field_name = line;
-            char *field_value = colon+1;
-            while(isspace(*field_value)) {
-                loc.col++;
-                field_value++;
-            }
-
-            size_t i = 0;
-            bool found = false;
-            while (!found && i < remaining_fields.count) {
-                if (streq(field_name, remaining_fields.items[i].name)) {
-                    ConfigField removed_field = remaining_fields.items[i];
-                    da_remove(&remaining_fields, i);
-                    da_push(&inserted_fields, removed_field);
-                    switch (removed_field.type)
-                    {
-                        case FIELD_BOOL: {
-                            bool value = *(bool *)removed_field.thefault;
-                            if (streq(field_value, "true")) value = true;
-                            else if (streq(field_value, "false")) value = false;
-                            else {
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects a boolean (`%s` or `%s`), but got `%s`\n", field_name, valid_values_field_bool[0], valid_values_field_bool[1], field_value);
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(bool *)removed_field.thefault ? "true" : "false");
-                            }
-                            *((bool *)removed_field.ptr) = value;
-                        } break;
-
-                        case FIELD_UINT: {
-                            size_t value = atoi(field_value);
-                            if (value == 0) {
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects an integer greater than 0, but got `%s`\n", field_name, field_value);
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
-                                *((size_t *)removed_field.ptr) = *((size_t *)removed_field.thefault);
-                            } else {
-                                *((size_t *)removed_field.ptr) = value;
-                                //printf("CONFIG: field `%s` set to `%zu`\n", field_name, value);
-                            }
-                        } break;
-
-                        case FIELD_STRING: {
-                            char *value = field_value;
-                            if (strlen(value) == 0) {
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects a non empty string\n", field_name);
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
-                                removed_field.ptr = strdup(*(char **)removed_field.thefault);
-                            } else removed_field.ptr = strdup(*(char **)value);
-                        } break;
-
-                        case FIELD_LIMITED_STRING: {
-                            size_t arrlen = 0;
-                            for (; removed_field.valid_values[arrlen]; arrlen++)
-                                ;
-                            char *value = field_value;
-                            bool is_str_empty = strlen(value) == 0;
-                            bool is_valid = false;
-                            size_t i = 0;
-                            if (!is_str_empty) {
-                                while (!is_valid && i < arrlen) {
-                                    if (streq(removed_field.valid_values[i], value)) is_valid = true;
-                                    else i++;
-                                }
-                            }
-                            if (!is_valid || is_str_empty) {
-                                is_valid = false;
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
-                                for (size_t j = 0; j < arrlen; j++) {
-                                    s_push_fstr(&config_log, "`%s`", removed_field.valid_values[j]);
-                                    if (arrlen > 2 && j < arrlen-2) s_push_cstr(&config_log, ", ");
-                                    else if (j == arrlen-2) s_push_cstr(&config_log, " or ");
-                                }
-                                s_push_fstr(&config_log, ", but got ");
-                                if (is_str_empty) s_push_fstr(&config_log, "an empty string ");
-                                else s_push_fstr(&config_log, "`%s` ", value);
-                                s_push_fstr(&config_log, "instead.\n");
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
-
-                                value = *(char **)removed_field.thefault;
-                            }
-                            if (!is_valid) i = 0;
-                            if (streq(field_name, "line_numbers")) {
-                                *((ConfigLineNumbers *)removed_field.ptr) = i;
-                            } else { // NOTE: this is useful in case I forget to implement one
-                                print_error_and_exit("Unreachable field name `%s` in load_config\n", field_name); 
-                            }
-                        } break;
-                        default:
-                            s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                            print_error_and_exit("Unreachable field type in load_config\n");
+                    n = t.number_value;
+                    if (i+1 >= tokens.count) {
+                        // TODO: report error
+                        break;
+                    } else {
+                        i++;
+                        t = tokens.items[i];
                     }
-                    found = true;
-                } else i++;
-            }
-
-            if (!found) {
-                found = false;
-                i = 0;
-                while (!found && i < inserted_fields.count) {
-                    if (streq(field_name, inserted_fields.items[i].name)) {
-                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                        s_push_fstr(&config_log, "ERROR: redeclaration of field `%s`\n", field_name);
-                        found = true;
-                    } else i++;
+                }
+                if (t.type != TOKEN_NAME) {
+                    // TODO: report error
+                    break;
                 }
             }
+        } break;
 
-            if (!found) {
-                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                s_push_fstr(&config_log, "ERROR: unknown field `%s`\n", field_name);
-            }
-        } else {
-            s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-            s_push_fstr(&config_log, "ERROR: I don't know what to do with `%s`\n", line);
+        default: {} // TODO report error
         }
-
-        loc.row++;
-        loc.col = 0;
     }
-    free(full_line);
+    //char *colon = NULL;
+    //if (*line == '#') {
+    //    line++;
+    //    loc.col++;
+    //    colon = strchr(line, ':');
+    //    if (colon == NULL) {
+    //        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //        s_push_fstr(&config_log, "ERROR: invalid command, it should be of the form #name: commands...\n");
+    //    } else {
+    //        *colon = '\0';
+    //        char *cmd_name = line;
+    //        bool already_defined = false;
+    //        da_enumerate(commands, Command, i, command) {
+    //            if (streq(cmd_name, command->name)) {
+    //                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                s_push_fstr(&config_log, "ERROR: redeclaration of %s command `%s`\n", 
+    //                        i < BUILTIN_CMDS_COUNT ? "builtin" : "user defined", cmd_name); 
+    //                already_defined = true;
+    //                break;
+    //            }
+    //        }
+    //        if (already_defined) {
+    //            loc.col = 0;
+    //            loc.row++;
+    //            continue;
+    //        }
+    //        loc.col += strlen(cmd_name) + 1;
+
+    //        char *cmds = colon+1;
+    //        Command user_defined_cmd = {
+    //            .name = strdup(cmd_name),
+    //        };
+    //        CommandArgs cmd_args = {0};
+    //        char *parse_error = parse_commands(cmds, &user_defined_cmd, &cmd_args, &loc);
+    //        if (parse_error != NULL) {
+    //            s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //            s_push_fstr(&config_log, "ERROR: %s\n", parse_error);
+    //            free(parse_error);
+    //        } else {
+    //            // TODO: che ci faccio con cmd_args?
+    //            add_user_command(user_defined_cmd);
+    //            s_push_fstr(&config_log, "added command `%s`\n", cmd_name);
+    //        }
+    //    }
+    //} else if ((colon = strchr(line, ':')) != NULL) {
+    //    *colon = '\0';
+    //    char *field_name = line;
+    //    char *field_value = colon+1;
+    //    while(isspace(*field_value)) {
+    //        loc.col++;
+    //        field_value++;
+    //    }
+
+    //    size_t i = 0;
+    //    bool found = false;
+    //    while (!found && i < remaining_fields.count) {
+    //        if (streq(field_name, remaining_fields.items[i].name)) {
+    //            ConfigField removed_field = remaining_fields.items[i];
+    //            da_remove(&remaining_fields, i);
+    //            da_push(&inserted_fields, removed_field);
+    //            switch (removed_field.type)
+    //            {
+    //                case FIELD_BOOL: {
+    //                    bool value = *(bool *)removed_field.thefault;
+    //                    if (streq(field_value, "true")) value = true;
+    //                    else if (streq(field_value, "false")) value = false;
+    //                    else {
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects a boolean (`%s` or `%s`), but got `%s`\n", field_name, valid_values_field_bool[0], valid_values_field_bool[1], field_value);
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(bool *)removed_field.thefault ? "true" : "false");
+    //                    }
+    //                    *((bool *)removed_field.ptr) = value;
+    //                } break;
+
+    //                case FIELD_UINT: {
+    //                    size_t value = atoi(field_value);
+    //                    if (value == 0) {
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects an integer greater than 0, but got `%s`\n", field_name, field_value);
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
+    //                        *((size_t *)removed_field.ptr) = *((size_t *)removed_field.thefault);
+    //                    } else {
+    //                        *((size_t *)removed_field.ptr) = value;
+    //                        //printf("CONFIG: field `%s` set to `%zu`\n", field_name, value);
+    //                    }
+    //                } break;
+
+    //                case FIELD_STRING: {
+    //                    char *value = field_value;
+    //                    if (strlen(value) == 0) {
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects a non empty string\n", field_name);
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
+    //                        removed_field.ptr = strdup(*(char **)removed_field.thefault);
+    //                    } else removed_field.ptr = strdup(*(char **)value);
+    //                } break;
+
+    //                case FIELD_LIMITED_STRING: {
+    //                    size_t arrlen = 0;
+    //                    for (; removed_field.valid_values[arrlen]; arrlen++)
+    //                        ;
+    //                    char *value = field_value;
+    //                    bool is_str_empty = strlen(value) == 0;
+    //                    bool is_valid = false;
+    //                    size_t i = 0;
+    //                    if (!is_str_empty) {
+    //                        while (!is_valid && i < arrlen) {
+    //                            if (streq(removed_field.valid_values[i], value)) is_valid = true;
+    //                            else i++;
+    //                        }
+    //                    }
+    //                    if (!is_valid || is_str_empty) {
+    //                        is_valid = false;
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
+    //                        for (size_t j = 0; j < arrlen; j++) {
+    //                            s_push_fstr(&config_log, "`%s`", removed_field.valid_values[j]);
+    //                            if (arrlen > 2 && j < arrlen-2) s_push_cstr(&config_log, ", ");
+    //                            else if (j == arrlen-2) s_push_cstr(&config_log, " or ");
+    //                        }
+    //                        s_push_fstr(&config_log, ", but got ");
+    //                        if (is_str_empty) s_push_fstr(&config_log, "an empty string ");
+    //                        else s_push_fstr(&config_log, "`%s` ", value);
+    //                        s_push_fstr(&config_log, "instead.\n");
+    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
+
+    //                        value = *(char **)removed_field.thefault;
+    //                    }
+    //                    if (!is_valid) i = 0;
+    //                    if (streq(field_name, "line_numbers")) {
+    //                        *((ConfigLineNumbers *)removed_field.ptr) = i;
+    //                    } else { // NOTE: this is useful in case I forget to implement one
+    //                        print_error_and_exit("Unreachable field name `%s` in load_config\n", field_name); 
+    //                    }
+    //                } break;
+    //                default:
+    //                    s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                    print_error_and_exit("Unreachable field type in load_config\n");
+    //            }
+    //            found = true;
+    //        } else i++;
+    //    }
+
+    //    if (!found) {
+    //        found = false;
+    //        i = 0;
+    //        while (!found && i < inserted_fields.count) {
+    //            if (streq(field_name, inserted_fields.items[i].name)) {
+    //                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //                s_push_fstr(&config_log, "ERROR: redeclaration of field `%s`\n", field_name);
+    //                found = true;
+    //            } else i++;
+    //        }
+    //    }
+
+    //    if (!found) {
+    //        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //        s_push_fstr(&config_log, "ERROR: unknown field `%s`\n", field_name);
+    //    }
+    //} else {
+    //    s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
+    //    s_push_fstr(&config_log, "ERROR: I don't know what to do with `%s`\n", line);
+    //}
+
+    //loc.row++;
+    //loc.col = 0;
 
     if (remaining_fields.count > 0) {
         s_push_cstr(&config_log, "\nWARNING: the following fields have not been set:\n");
@@ -1455,20 +1622,20 @@ void load_config()
             switch (field->type)
             {
                 case FIELD_BOOL:
-                    s_push_fstr(&config_log, "`%s`)\n", *(bool *)field->thefault ? "true" : "false");
-                    *((bool *)field->ptr) = *((bool *)field->thefault);
+                    s_push_fstr(&config_log, "`%s`)\n", field->bool_default ? "true" : "false");
+                    *field->bool_ptr = field->bool_default;
                     break;
                 case FIELD_UINT:
-                    s_push_fstr(&config_log, "`%zu`)\n", *(size_t *)field->thefault);
-                    *((size_t *)field->ptr) = *((size_t *)field->thefault);
+                    s_push_fstr(&config_log, "`%zu`)\n", field->uint_default);
+                    *field->uint_ptr = field->uint_default;
                     break;
                 case FIELD_STRING:
-                    s_push_fstr(&config_log, "`%s`)\n", (char *)field->thefault);
-                    *((char **)field->ptr) = strdup(field->thefault);
+                    s_push_fstr(&config_log, "`%s`)\n", field->string_default);
+                    *field->string_ptr = strdup(field->string_default);
                     break;
                 case FIELD_LIMITED_STRING:
-                    s_push_fstr(&config_log, "`%s`)\n", (char *)field->thefault);
-                    *((char **)field->ptr) = strdup(field->thefault);
+                    s_push_fstr(&config_log, "`%s`)\n", field->limited_string_default);
+                    *field->limited_string_ptr = strdup(field->limited_string_default);
                     // TODO: magari elencare anche qua i possibili valori
                     break;
                 default:
