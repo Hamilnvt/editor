@@ -527,6 +527,9 @@ typedef struct
     size_t col;
 } Location;
 
+#define LOC_FMT "%s:%zu:%zu:"
+#define LOC_ARG(loc) (loc).path, (loc).row, (loc).col
+
 size_t trim_left(char **str)
 {
     char *tmp = *str;
@@ -571,12 +574,16 @@ char *read_file(char *path)
 
 typedef enum
 {
-    TOKEN_NAME = 256,
+    TOKEN_IDENT = 256,
     TOKEN_NUMBER,
     TOKEN_STRING,
+    TOKEN_SET,
+    TOKEN_VAR,
 
-    TOKEN_EOF
+    TOKEN_EOF,
+    TOKENS_COUNT
 } TokenType;
+#define ACTUAL_TOKENS_COUNT (TOKENS_COUNT-256)
 
 typedef struct
 {
@@ -588,25 +595,72 @@ typedef struct
     Location loc;
 } Token;
 
-void token_print(Token token)
+static_assert(ACTUAL_TOKENS_COUNT == 6, "token_type_as_cstr");
+char *token_type_as_cstr(TokenType type)
 {
-    char *path = token.loc.path;
-    size_t col = token.loc.col + 1;
-    size_t row = token.loc.row + 1;
+    if (type >= 0 && type <= 255) {
+        if (isprint(type)) return "char";
+        else               return "control char";
+    } else {
+        switch (type)
+        {
+            case TOKEN_IDENT:  return "identifier";
+            case TOKEN_NUMBER: return "number";
+            case TOKEN_STRING: return "string";
+            case TOKEN_SET:    return "set";
+            case TOKEN_VAR:    return "var";
+            case TOKEN_EOF:    return "EOF";
+            default:           return NULL;
+        }
+    }
+}
 
+static_assert(ACTUAL_TOKENS_COUNT == 6, "token_type_and_value_as_str");
+char *token_type_and_value_as_str(Token token)
+{
+    const size_t n = 128;
+    char *result = malloc(sizeof(char)*n);
+    char *type = token_type_as_cstr(token.type);
     if (token.type >= 0 && token.type <= 255) {
-        if (isprint(token.type)) log_this("%s:%zu:%zu: char: '%c'", path, row, col, token.type);
-        else                     log_this("%s:%zu:%zu: control char: '%d'", path, row, col, token.type);
+        if (isprint(token.type)) sprintf(result, "%s '%c'", type, token.type);
+        else                     sprintf(result, "%s '%d'", type, token.type);
     } else {
         switch (token.type)
         {
-            case TOKEN_NAME:   log_this("%s:%zu:%zu: name: `%s`", path, row, col, token.string_value); break;
-            case TOKEN_NUMBER: log_this("%s:%zu:%zu: number: `%d`", path, row, col, token.number_value); break;
-            case TOKEN_STRING: log_this("%s:%zu:%zu: string: \"%s\"", path, row, col, token.string_value); break;
-            case TOKEN_EOF:    log_this("EOF"); break;
+            case TOKEN_IDENT: sprintf(result, "%s `%s`", type, token.string_value); break;
+            case TOKEN_NUMBER: sprintf(result, "%s `%d`", type, token.number_value); break;
+            case TOKEN_STRING: {
+                snprintf(result, n-1, "%s \"%s\"", type, token.string_value);
+                result[n] = '\0';
+            } break;
+
+            case TOKEN_SET:
+            case TOKEN_VAR:
+            case TOKEN_EOF:
+                sprintf(result, "%s", type);
+                break;
             default: print_error_and_exit("Unreachable");
         }
     }
+    return result;
+}
+
+void token_log(Token token)
+{
+    char *string = token_type_and_value_as_str(token);
+    log_this(LOC_FMT" %s", LOC_ARG(token.loc), string);
+    free(string);
+}
+
+bool expect_token_to_be_of_type(Token t, TokenType type, String *s_log)
+{
+    if (t.type == type) return true;
+
+    char *tokstrval = token_type_and_value_as_str(t);
+    s_push_fstr(s_log, LOC_FMT" ERROR: expecting %s but got %s", LOC_ARG(t.loc),
+            token_type_as_cstr(type), tokstrval);
+    free(tokstrval);
+    return false;
 }
 
 typedef struct
@@ -696,25 +750,29 @@ bool lexer_next(Lexer *l)
             return lexer_next(l);
         }
     } else if (isalpha(c) || c == '_') {
-        char *name = l->str;
+        char *begin = l->str;
         size_t len = 0;
         while (isalnum(c) || c == '_') {
             l->str++;
             len++;
             c = *l->str;
         }
-        l->token.type = TOKEN_NAME;
         l->loc.col += len;
-        l->token.string_value = malloc(sizeof(char)*len + 1);
-        strncpy(l->token.string_value, name, len);
-        l->token.string_value[len] = '\0';
+        if      (strneq(begin, "set", len)) l->token.type = TOKEN_SET;
+        else if (strneq(begin, "var", len)) l->token.type = TOKEN_VAR;
+        else {
+            l->token.type = TOKEN_IDENT;
+            l->token.string_value = malloc(sizeof(char)*len + 1);
+            strncpy(l->token.string_value, begin, len);
+            l->token.string_value[len] = '\0';
+        }
     } else if (isdigit(c) || c == '-') {
         char *end;
         long n = strtol(l->str, &end, 10);
-        l->token.type = TOKEN_NUMBER;
         l->token.number_value = n;
         l->loc.col += end - l->str;
         l->str = end;
+        l->token.type = TOKEN_NUMBER;
     } else if (c == '"') {
         lexer_string(l);
     } else {
@@ -725,6 +783,7 @@ bool lexer_next(Lexer *l)
     return true;
 }
 
+static_assert(ACTUAL_TOKENS_COUNT == 6, "lexer_get_current_token");
 Token lexer_get_current_token(Lexer *l)
 {
     Token token = l->token;
@@ -735,32 +794,33 @@ Token lexer_get_current_token(Lexer *l)
     switch (token.type)
     {
     case TOKEN_NUMBER:
+    case TOKEN_SET:
+    case TOKEN_VAR:
     case TOKEN_EOF:
         break;
 
-    case TOKEN_NAME:
+    case TOKEN_IDENT:
     case TOKEN_STRING:
         token.string_value = strdup(l->token.string_value);
         break;
 
-    default: print_error_and_exit("Unreachable token type %u", token.type);
+    default: print_error_and_exit("Unreachable token type %u in lexer_get_current_token", token.type);
     }
 
     return token;
 }
 
+static_assert(ACTUAL_TOKENS_COUNT == 6, "free_token");
 void free_token(Token *token)
 {
     if (token->loc.path) free(token->loc.path);
     switch (token->type)
     {
-    case TOKEN_NAME:
+    case TOKEN_IDENT:
     case TOKEN_STRING:
         free(token->string_value);
         break;
 
-    case TOKEN_NUMBER:
-    case TOKEN_EOF:
     default: {}
     }
 }
@@ -779,7 +839,7 @@ Tokens lex_file(char *path)
     while (lexer_next(&lex)) {
         Token token = lexer_get_current_token(&lex);
         da_push(&tokens, token);
-        token_print(token);
+        token_log(token);
         lexer_free_current_token(&lex);
     }
     Token eof = { .type = TOKEN_EOF };
@@ -913,18 +973,22 @@ char *parse_commands(char *cmds_str, Command *cmd, CommandArgs *args, Location *
 typedef enum
 {
     FIELD_BOOL,
+    FIELD_INT,
     FIELD_UINT,
     FIELD_STRING,
     FIELD_LIMITED_STRING,
     //FIELD_LIMITED_UINT,
     //FIELD_RANGE_UINT,
+    FIELDS_COUNT,
 } FieldType;
 
+static_assert(FIELDS_COUNT == 5, "fieldtype_to_string");
 char *fieldtype_to_string(FieldType type)
 {
     switch (type)
     {
         case FIELD_BOOL:           return "bool";
+        case FIELD_INT:            return "int";
         case FIELD_UINT:           return "uint";
         case FIELD_STRING:         return "string";
         case FIELD_LIMITED_STRING: return "limited string";
@@ -932,6 +996,8 @@ char *fieldtype_to_string(FieldType type)
             print_error_and_exit("Unreachable\n");
     }
 }
+
+typedef int LimitedStringIndex;
 
 typedef struct
 {
@@ -942,6 +1008,10 @@ typedef struct
             bool *bool_ptr;
             bool bool_default;
         };
+        struct { // FIELD_INT
+            int *int_ptr;   
+            int int_default;   
+        };
         struct { // FIELD_UINT
             size_t *uint_ptr;   
             size_t uint_default;   
@@ -951,9 +1021,9 @@ typedef struct
             char *string_default;
         };
         struct { // FIELD_LIMITED_STRING
-            char **limited_string_ptr;
-            char *limited_string_default;
-            char **limited_string_valid_values;
+            LimitedStringIndex *limited_string_ptr;
+            LimitedStringIndex limited_string_default;
+            Strings limited_string_valid_values;
         };
     };
 } ConfigField;
@@ -972,6 +1042,16 @@ ConfigField create_field_bool(char *name, bool *ptr, bool thefault)
         .type = FIELD_BOOL,
         .bool_ptr = ptr,
         .bool_default = thefault
+    };
+}
+
+ConfigField create_field_int(char *name, int *ptr, int thefault)
+{
+    return (ConfigField){
+        .name = name,
+        .type = FIELD_INT,
+        .int_ptr = ptr,
+        .int_default = thefault
     };
 }
 
@@ -995,13 +1075,13 @@ ConfigField create_field_string(char *name, char **ptr, char *thefault)
     };
 }
 
-ConfigField create_field_limited_string(char *name, char **ptr, const char *thefault, const char **valid_values)
+ConfigField create_field_limited_string(char *name, LimitedStringIndex *ptr, LimitedStringIndex thefault, Strings valid_values)
 {
     return (ConfigField){
         .name = name,
         .type = FIELD_LIMITED_STRING,
         .limited_string_ptr = ptr,
-        .limited_string_default = strdup(thefault),
+        .limited_string_default = thefault,
         .limited_string_valid_values = valid_values
     };
 }
@@ -1302,12 +1382,16 @@ void load_config()
 
     const size_t default_quit_times = 3;
     const size_t default_msg_lifetime = 3;
-    const char *default_line_numbers = "no";
+    const ConfigLineNumbers default_line_numbers = LN_NO;
 
     const char *valid_values_field_bool[] = {"true", "false", NULL};
     (void)valid_values_field_bool;
 
-    const char *valid_values_line_numbers[] = {"no", "absolute", "relative", NULL};
+    Strings valid_values_line_numbers = {0};
+    {
+        char *values[] = {"no", "absolute", "relative"};
+        da_push_many(&valid_values_line_numbers, values, 3);
+    }
 
     String config_log = {0};
 
@@ -1329,7 +1413,7 @@ void load_config()
         fprintf(config_file, "msg_lifetime: %zu\t// time in seconds of the duration of a message\n",
                 default_msg_lifetime);
         fprintf(config_file, "line_numbers: %s\t// display line numbers at_all, absolute or relative to the current line\n",
-                default_line_numbers);
+                valid_values_line_numbers.items[default_line_numbers]);
 
         s_push_fstr(&config_log, "NOTE: default config file has been created\n\n");
         rewind(config_file);
@@ -1339,8 +1423,8 @@ void load_config()
 
     da_push(&remaining_fields, create_field_uint("quit_times", &config.quit_times, default_quit_times));
     da_push(&remaining_fields, create_field_uint("msg_lifetime", (size_t *)&config.msg_lifetime, default_msg_lifetime));
-    da_push(&remaining_fields, create_field_limited_string("line_numbers", &config.line_numbers, default_line_numbers,
-                valid_values_line_numbers));
+    da_push(&remaining_fields, create_field_limited_string("line_numbers", (LimitedStringIndex *)&config.line_numbers,
+                default_line_numbers, valid_values_line_numbers));
     
     //if (DEBUG) {
     //    for (size_t i = 0; i < remaining_fields.count; i++) {
@@ -1391,57 +1475,49 @@ void load_config()
     Tokens tokens = lex_file(full_config_path);
 
     for (size_t i = 0; i < tokens.count; i++) {
-        Token token = tokens.items[i];
-        switch (token.type)
+        Token first_token = tokens.items[i];
+        switch (first_token.type)
         {
-        case TOKEN_NAME: {
-            if (i+1 >= tokens.count || tokens.items[i+1].type != '=') {
-                // TODO: report error
-                continue;
-            }
+        case TOKEN_SET: {
+            i++;
+            Token token_config_field_name = tokens.items[i];
+            if (!expect_token_to_be_of_type(token_config_field_name, TOKEN_IDENT, &config_log)) continue;
+            i++;
+            Token token_equals = tokens.items[i];
+            if (!expect_token_to_be_of_type(token_equals, '=', &config_log)) continue;
+            char *field_name = token_config_field_name.string_value;
+            print_error_and_exit("Parse field value of `%s`", field_name);
+            // TODO
         } break;
 
         case '#': {
-            if (i+1 >= tokens.count || tokens.items[i+1].type != TOKEN_NAME) {
-                // TODO: report erorr
-                continue;
-            }
             i++;
-            Token command_name_token = tokens.items[i];
-            if (i+1 >= tokens.count || tokens.items[i+1].type != ':') {
-                // TODO: report erorr
-                continue;
-            }
+            Token token_command_name= tokens.items[i];
+            if (!expect_token_to_be_of_type(token_command_name, TOKEN_IDENT, &config_log)) continue;
             i++;
-            if (i+1 >= tokens.count) {
-                // TODO: report error
-            }
+            Token token_colon = tokens.items[i];
+            if (!expect_token_to_be_of_type(token_colon, ':', &config_log)) continue;
             i++;
             while (true) {
                 Token t = tokens.items[i];
-                size_t n = 1;
+                size_t n = 1; (void)n; // TODO
                 if (t.type == TOKEN_NUMBER) {
                     if (t.number_value <= 0) {
-                        // TODO: report error
+                        s_push_fstr(&config_log, LOC_FMT" ERROR: multiplicity number should be > 0 (got %d)",
+                                LOC_ARG(t.loc), t.number_value);
                         break;
                     }
                     n = t.number_value;
-                    if (i+1 >= tokens.count) {
-                        // TODO: report error
-                        break;
-                    } else {
-                        i++;
-                        t = tokens.items[i];
-                    }
+                    i++;
+                    t = tokens.items[i];
                 }
-                if (t.type != TOKEN_NAME) {
-                    // TODO: report error
-                    break;
-                }
+                if (!expect_token_to_be_of_type(t, TOKEN_IDENT, &config_log)) continue;
             }
         } break;
 
-        default: {} // TODO report error
+        default:
+            print_error_and_exit("Unreachable token type %s (%u) in load_config\n",
+                token_type_as_cstr(first_token.type), first_token.type);
         }
     }
     //char *colon = NULL;
@@ -1635,7 +1711,7 @@ void load_config()
                     break;
                 case FIELD_LIMITED_STRING:
                     s_push_fstr(&config_log, "`%s`)\n", field->limited_string_default);
-                    *field->limited_string_ptr = strdup(field->limited_string_default);
+                    *field->limited_string_ptr = field->limited_string_default;
                     // TODO: magari elencare anche qua i possibili valori
                     break;
                 default:
@@ -1644,10 +1720,10 @@ void load_config()
         }
     }
 
-    //s_push_fstr(&config_log, "\nDefined commands:\n");
-    //for (size_t i = 0; i < commands.count; i++) {
-    //    s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", commands.items[i].name);
-    //}
+    s_push_fstr(&config_log, "\nDefined commands:\n");
+    da_enumerate (commands, Command, i, command) {
+        s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", command->name);
+    }
 
     if (!s_is_empty(config_log)) {
         s_push_null(&config_log);

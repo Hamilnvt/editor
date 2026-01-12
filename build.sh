@@ -15,7 +15,7 @@ fi
 
 if (( $RELEASE )) then
     echo "release"
-    gcc -o editor editor.c -lncurses -lm -Wall -Wextra -Wswitch-enum -Werror -Wno-discarded-qualifiers -O2
+    gcc -o editor editor.c -lncurses -lm -Wall -Wextra -Werror -Wno-switch -Wno-discarded-qualifiers -O2
 else
-    gcc -o editor editor.c -lncurses -lm -Wall -Wextra -Wswitch-enum -Werror -Wno-discarded-qualifiers -ggdb
+    gcc -o editor editor.c -lncurses -lm -Wall -Wextra -Werror -Wno-switch -Wno-discarded-qualifiers -ggdb
 fi
