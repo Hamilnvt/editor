@@ -577,6 +577,10 @@ typedef enum
     TOKEN_IDENT = 256,
     TOKEN_NUMBER,
     TOKEN_STRING,
+
+    TOKEN_TRUE,
+    TOKEN_FALSE,
+
     TOKEN_SET,
     TOKEN_VAR,
 
@@ -595,7 +599,7 @@ typedef struct
     Location loc;
 } Token;
 
-static_assert(ACTUAL_TOKENS_COUNT == 6, "token_type_as_cstr");
+static_assert(ACTUAL_TOKENS_COUNT == 8, "token_type_as_cstr");
 char *token_type_as_cstr(TokenType type)
 {
     if (type >= 0 && type <= 255) {
@@ -607,6 +611,8 @@ char *token_type_as_cstr(TokenType type)
             case TOKEN_IDENT:  return "identifier";
             case TOKEN_NUMBER: return "number";
             case TOKEN_STRING: return "string";
+            case TOKEN_TRUE:   return "true";
+            case TOKEN_FALSE:  return "false";
             case TOKEN_SET:    return "set";
             case TOKEN_VAR:    return "var";
             case TOKEN_EOF:    return "EOF";
@@ -615,7 +621,7 @@ char *token_type_as_cstr(TokenType type)
     }
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 6, "token_type_and_value_as_str");
+static_assert(ACTUAL_TOKENS_COUNT == 8, "token_type_and_value_as_str");
 char *token_type_and_value_as_str(Token token)
 {
     const size_t n = 128;
@@ -634,6 +640,8 @@ char *token_type_and_value_as_str(Token token)
                 result[n] = '\0';
             } break;
 
+            case TOKEN_TRUE:
+            case TOKEN_FALSE:
             case TOKEN_SET:
             case TOKEN_VAR:
             case TOKEN_EOF:
@@ -652,14 +660,37 @@ void token_log(Token token)
     free(string);
 }
 
+#define NO_LOG NULL
 bool expect_token_to_be_of_type(Token t, TokenType type, String *s_log)
 {
     if (t.type == type) return true;
 
-    char *tokstrval = token_type_and_value_as_str(t);
-    s_push_fstr(s_log, LOC_FMT" ERROR: expecting %s but got %s", LOC_ARG(t.loc),
-            token_type_as_cstr(type), tokstrval);
-    free(tokstrval);
+    if (s_log) {
+        char *tokstrval = token_type_and_value_as_str(t);
+        s_push_fstr(s_log, LOC_FMT" ERROR: expecting %s but got %s\n", LOC_ARG(t.loc),
+                token_type_as_cstr(type), tokstrval);
+        free(tokstrval);
+    }
+    return false;
+}
+
+bool expect_token_to_be_of_types(Token t, TokenType *types, size_t n, String *s_log)
+{
+    if (!types || n == 0) return true;
+
+    for (size_t i = 0; i < n; i++)
+        if (t.type == types[i]) return true;
+
+    if (s_log) {
+        s_push_fstr(s_log, LOC_FMT" ERROR: expecting one of the following tokens ", LOC_ARG(t.loc));
+        for (size_t i = 0; i < n; i++) {
+            s_push_fstr(s_log, "`%s`", token_type_as_cstr(types[i]));
+            if (i < n-1) s_push_fstr(s_log, ", ");
+        }
+        char *tokstrval = token_type_and_value_as_str(t);
+        s_push_fstr(s_log, " but got %s\n", tokstrval);
+        free(tokstrval);
+    }
     return false;
 }
 
@@ -723,7 +754,6 @@ bool lexer_string(Lexer *l)
     l->token.string_value[len] = '\0';
     l->str = end;
     l->loc.col += len;
-    log_this("Lexed string: \"%s\"", l->token.string_value);
     return true;
 }
 
@@ -783,7 +813,7 @@ bool lexer_next(Lexer *l)
     return true;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 6, "lexer_get_current_token");
+static_assert(ACTUAL_TOKENS_COUNT == 8, "lexer_get_current_token");
 Token lexer_get_current_token(Lexer *l)
 {
     Token token = l->token;
@@ -794,6 +824,8 @@ Token lexer_get_current_token(Lexer *l)
     switch (token.type)
     {
     case TOKEN_NUMBER:
+    case TOKEN_TRUE:
+    case TOKEN_FALSE:
     case TOKEN_SET:
     case TOKEN_VAR:
     case TOKEN_EOF:
@@ -810,7 +842,7 @@ Token lexer_get_current_token(Lexer *l)
     return token;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 6, "free_token");
+static_assert(ACTUAL_TOKENS_COUNT == 8, "free_token");
 void free_token(Token *token)
 {
     if (token->loc.path) free(token->loc.path);
@@ -1490,113 +1522,121 @@ void load_config()
             Token token_field_value = tokens.items[i];
 
             bool found = false;
-            while (!found && i < remaining_fields.count) {
-                if (streq(field_name, remaining_fields.items[i].name)) {
-                    ConfigField removed_field = remaining_fields.items[i];
-                    da_remove(&remaining_fields, i);
+            size_t j = 0;
+            while (!found && j < remaining_fields.count) {
+                if (streq(field_name, remaining_fields.items[j].name)) {
+                    found = true;
+                    ConfigField removed_field = remaining_fields.items[j];
+                    da_remove(&remaining_fields, j);
                     da_push(&inserted_fields, removed_field);
                     switch (removed_field.type)
                     {
                         case FIELD_BOOL: {
-                            bool value = removed_field.bool_default;
-                            if (!expect_token_to_be_of_type(token_field_value, TOKEN_BOOL, &config_log)) {
+                            bool value;
+                            const TokenType TOKEN_BOOL[2] = {TOKEN_TRUE, TOKEN_FALSE};
+                            if (!expect_token_to_be_of_types(token_field_value, TOKEN_BOOL, 2, &config_log)) {
                                 s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to `%s`\n",
-                                        LOC_ARG(token_field_value), removed_field.bool_default ? "true" : "false");
-                            } else {
-                                value = token_field_value.bool_value;
+                                        LOC_ARG(token_field_value.loc), removed_field.bool_default ? "true" : "false");
+                                value = removed_field.bool_default;
                             }
+                            if (token_field_value.type == TOKEN_TRUE) value = true;
+                            else value = false;
                             *removed_field.bool_ptr = value;
                         } break;
 
-                        // TODO (continue from here and add TOKEN_BOOL)
                         case FIELD_UINT: {
-                            size_t value = atoi(field_value);
-                            if (value == 0) {
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects an integer greater than 0, but got `%s`\n", field_name, field_value);
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
-                                *((size_t *)removed_field.ptr) = *((size_t *)removed_field.thefault);
-                            } else {
-                                *((size_t *)removed_field.ptr) = value;
-                                //printf("CONFIG: field `%s` set to `%zu`\n", field_name, value);
+                            size_t value = token_field_value.number_value;
+                            if (!expect_token_to_be_of_type(token_field_value, TOKEN_NUMBER, &config_log)
+                                || value <= 0) {
+                                s_push_fstr(&config_log, LOC_FMT" NOTE: value must be > 0\n",
+                                        LOC_ARG(token_field_value.loc));
+                                s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to `%zu`\n",
+                                        LOC_ARG(token_field_value.loc), removed_field.uint_default);
+                                value = removed_field.uint_default;
                             }
+                            *removed_field.uint_ptr = value;
                         } break;
 
                         case FIELD_STRING: {
-                            char *value = field_value;
-                            if (strlen(value) == 0) {
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects a non empty string\n", field_name);
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
-                                removed_field.ptr = strdup(*(char **)removed_field.thefault);
-                            } else removed_field.ptr = strdup(*(char **)value);
+                            char *value;
+                            if (!expect_token_to_be_of_type(token_field_value, TOKEN_STRING, &config_log) || strlen(value) == 0) {
+                                s_push_fstr(&config_log, LOC_FMT" NOTE: value must be a non empty string\n",
+                                        LOC_ARG(token_field_value.loc));
+                                s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to \"%s\"\n",
+                                        LOC_ARG(token_field_value.loc), removed_field.string_default);
+                                value = strdup(removed_field.string_default);
+                            } else value = strdup(token_field_value.string_value);
+                            *removed_field.string_ptr = value;
                         } break;
 
                         case FIELD_LIMITED_STRING: {
-                            size_t arrlen = 0;
-                            for (; removed_field.valid_values[arrlen]; arrlen++)
-                                ;
-                            char *value = field_value;
+                            char *value = token_field_value.string_value;
+                            // TODO: non mi piace che sia TOKEN_STRING perche' significa che lo devo mettere tra virgolette, sarebbe meglio TOKEN_IDENT
+                            bool is_wrong_token_type = !expect_token_to_be_of_type(token_field_value,
+                                    TOKEN_STRING, NO_LOG);
                             bool is_str_empty = strlen(value) == 0;
-                            bool is_valid = false;
-                            size_t i = 0;
-                            if (!is_str_empty) {
-                                while (!is_valid && i < arrlen) {
-                                    if (streq(removed_field.valid_values[i], value)) is_valid = true;
-                                    else i++;
+                            LimitedStringIndex index = -1;
+                            if (!is_wrong_token_type && !is_str_empty) {
+                                for (size_t i = 0; i < removed_field.limited_string_valid_values.count; i++) {
+                                    if (streq(removed_field.limited_string_valid_values.items[i], value)) {
+                                        index = i;
+                                        break;
+                                    }
                                 }
                             }
-                            if (!is_valid || is_str_empty) {
-                                is_valid = false;
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
-                                for (size_t j = 0; j < arrlen; j++) {
-                                    s_push_fstr(&config_log, "`%s`", removed_field.valid_values[j]);
-                                    if (arrlen > 2 && j < arrlen-2) s_push_cstr(&config_log, ", ");
-                                    else if (j == arrlen-2) s_push_cstr(&config_log, " or ");
+                            bool is_not_valid = index == -1;
+                            if (is_wrong_token_type || is_str_empty || is_not_valid) {
+                                if (is_wrong_token_type) {
+                                    expect_token_to_be_of_type(token_field_value, TOKEN_STRING, &config_log);
+                                } else if (is_str_empty) {
+                                    s_push_fstr(&config_log, LOC_FMT" ERROR: ...\n");
+                                } else if (is_not_valid) {
+                                    s_push_fstr(&config_log, LOC_FMT" ERROR: ...\n");
                                 }
-                                s_push_fstr(&config_log, ", but got ");
-                                if (is_str_empty) s_push_fstr(&config_log, "an empty string ");
-                                else s_push_fstr(&config_log, "`%s` ", value);
-                                s_push_fstr(&config_log, "instead.\n");
-                                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                                s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
+                                s_push_fstr(&config_log, LOC_FMT" NOTE: value must be a non empty string among one of the following values: ",
+                                        LOC_ARG(token_field_value.loc));
 
-                                value = *(char **)removed_field.thefault;
-                            }
-                            if (!is_valid) i = 0;
-                            if (streq(field_name, "line_numbers")) {
-                                *((ConfigLineNumbers *)removed_field.ptr) = i;
-                            } else { // NOTE: this is useful in case I forget to implement one
-                                print_error_and_exit("Unreachable field name `%s` in load_config\n", field_name); 
+                                size_t count = removed_field.limited_string_valid_values.count;
+                                for (size_t i = 0; i < count; i++) {
+                                    s_push_fstr(&config_log, "`%s`", removed_field.limited_string_valid_values.items[i]);
+                                    if (count > 2 && i < count-2) s_push_cstr(&config_log, ", ");
+                                    else if (i == count-2) s_push_cstr(&config_log, " or ");
+                                    else s_push_fstr(&config_log, "\n");
+                                }
+
+                                s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to \"%s\"\n",
+                                        LOC_ARG(token_field_value.loc), removed_field.limited_string_valid_values.items[removed_field.limited_string_default]);
+                                *removed_field.limited_string_ptr = removed_field.limited_string_default;
+                            } else {
+                                *removed_field.limited_string_ptr = index;
                             }
                         } break;
-                        default:
-                            s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                            print_error_and_exit("Unreachable field type in load_config\n");
+
+                        default: print_error_and_exit(LOC_FMT" Unreachable field type %u in load_config",
+                                    LOC_ARG(token_field_value.loc), removed_field.type);
                     }
-                    found = true;
-                } else i++;
+                } else j++;
             }
 
             if (!found) {
-                found = false;
-                i = 0;
-                while (!found && i < inserted_fields.count) {
-                    if (streq(field_name, inserted_fields.items[i].name)) {
-                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                        s_push_fstr(&config_log, "ERROR: redeclaration of field `%s`\n", field_name);
+                size_t k = 0;
+                while (!found && k < inserted_fields.count) {
+                    if (streq(field_name, inserted_fields.items[k].name)) {
+                        s_push_fstr(&config_log, LOC_FMT" ERROR: redeclaration of field `%s`\n",
+                                LOC_ARG(token_field_name.loc), field_name);
                         found = true;
-                    } else i++;
+                    } else k++;
                 }
             }
 
             if (!found) {
-                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-                s_push_fstr(&config_log, "ERROR: unknown field `%s`\n", field_name);
+                s_push_fstr(&config_log, LOC_FMT" ERROR: unknown field `%s`\n",
+                        LOC_ARG(token_field_name.loc), field_name);
             }
+        } break;
+
+        case TOKEN_VAR: {
+            // TODO
         } break;
 
         case '#': {
@@ -1608,6 +1648,10 @@ void load_config()
             if (!expect_token_to_be_of_type(token_colon, ':', &config_log)) continue;
             i++;
             while (true) {
+                s_push_fstr(&config_log, "TODO: parse commands list");
+                break;
+                //
+
                 Token t = tokens.items[i];
                 size_t n = 1; (void)n; // TODO
                 if (t.type == TOKEN_NUMBER) {
@@ -1625,8 +1669,9 @@ void load_config()
         } break;
 
         default:
-            print_error_and_exit("Unreachable token type %s (%u) in load_config\n",
-                token_type_as_cstr(first_token.type), first_token.type);
+            char *tokstrval = token_type_and_value_as_str(first_token);
+            s_push_fstr(&config_log, LOC_FMT" ERROR: Unexpected %s\n", LOC_ARG(first_token.loc), tokstrval);
+            free(tokstrval);
         }
     }
     //char *colon = NULL;
@@ -1682,124 +1727,6 @@ void load_config()
     //        field_value++;
     //    }
 
-    //    size_t i = 0;
-    //    bool found = false;
-    //    while (!found && i < remaining_fields.count) {
-    //        if (streq(field_name, remaining_fields.items[i].name)) {
-    //            ConfigField removed_field = remaining_fields.items[i];
-    //            da_remove(&remaining_fields, i);
-    //            da_push(&inserted_fields, removed_field);
-    //            switch (removed_field.type)
-    //            {
-    //                case FIELD_BOOL: {
-    //                    bool value = *(bool *)removed_field.thefault;
-    //                    if (streq(field_value, "true")) value = true;
-    //                    else if (streq(field_value, "false")) value = false;
-    //                    else {
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects a boolean (`%s` or `%s`), but got `%s`\n", field_name, valid_values_field_bool[0], valid_values_field_bool[1], field_value);
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(bool *)removed_field.thefault ? "true" : "false");
-    //                    }
-    //                    *((bool *)removed_field.ptr) = value;
-    //                } break;
-
-    //                case FIELD_UINT: {
-    //                    size_t value = atoi(field_value);
-    //                    if (value == 0) {
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects an integer greater than 0, but got `%s`\n", field_name, field_value);
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%zu`\n", *((size_t *)removed_field.thefault));
-    //                        *((size_t *)removed_field.ptr) = *((size_t *)removed_field.thefault);
-    //                    } else {
-    //                        *((size_t *)removed_field.ptr) = value;
-    //                        //printf("CONFIG: field `%s` set to `%zu`\n", field_name, value);
-    //                    }
-    //                } break;
-
-    //                case FIELD_STRING: {
-    //                    char *value = field_value;
-    //                    if (strlen(value) == 0) {
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects a non empty string\n", field_name);
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
-    //                        removed_field.ptr = strdup(*(char **)removed_field.thefault);
-    //                    } else removed_field.ptr = strdup(*(char **)value);
-    //                } break;
-
-    //                case FIELD_LIMITED_STRING: {
-    //                    size_t arrlen = 0;
-    //                    for (; removed_field.valid_values[arrlen]; arrlen++)
-    //                        ;
-    //                    char *value = field_value;
-    //                    bool is_str_empty = strlen(value) == 0;
-    //                    bool is_valid = false;
-    //                    size_t i = 0;
-    //                    if (!is_str_empty) {
-    //                        while (!is_valid && i < arrlen) {
-    //                            if (streq(removed_field.valid_values[i], value)) is_valid = true;
-    //                            else i++;
-    //                        }
-    //                    }
-    //                    if (!is_valid || is_str_empty) {
-    //                        is_valid = false;
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "ERROR: field `%s` expects one of the following values: ", field_name);
-    //                        for (size_t j = 0; j < arrlen; j++) {
-    //                            s_push_fstr(&config_log, "`%s`", removed_field.valid_values[j]);
-    //                            if (arrlen > 2 && j < arrlen-2) s_push_cstr(&config_log, ", ");
-    //                            else if (j == arrlen-2) s_push_cstr(&config_log, " or ");
-    //                        }
-    //                        s_push_fstr(&config_log, ", but got ");
-    //                        if (is_str_empty) s_push_fstr(&config_log, "an empty string ");
-    //                        else s_push_fstr(&config_log, "`%s` ", value);
-    //                        s_push_fstr(&config_log, "instead.\n");
-    //                        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                        s_push_fstr(&config_log, "NOTE: defaulted to `%s`\n", *(char **)removed_field.thefault);
-
-    //                        value = *(char **)removed_field.thefault;
-    //                    }
-    //                    if (!is_valid) i = 0;
-    //                    if (streq(field_name, "line_numbers")) {
-    //                        *((ConfigLineNumbers *)removed_field.ptr) = i;
-    //                    } else { // NOTE: this is useful in case I forget to implement one
-    //                        print_error_and_exit("Unreachable field name `%s` in load_config\n", field_name); 
-    //                    }
-    //                } break;
-    //                default:
-    //                    s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                    print_error_and_exit("Unreachable field type in load_config\n");
-    //            }
-    //            found = true;
-    //        } else i++;
-    //    }
-
-    //    if (!found) {
-    //        found = false;
-    //        i = 0;
-    //        while (!found && i < inserted_fields.count) {
-    //            if (streq(field_name, inserted_fields.items[i].name)) {
-    //                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                s_push_fstr(&config_log, "ERROR: redeclaration of field `%s`\n", field_name);
-    //                found = true;
-    //            } else i++;
-    //        }
-    //    }
-
-    //    if (!found) {
-    //        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //        s_push_fstr(&config_log, "ERROR: unknown field `%s`\n", field_name);
-    //    }
-    //} else {
-    //    s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //    s_push_fstr(&config_log, "ERROR: I don't know what to do with `%s`\n", line);
-    //}
-
-    //loc.row++;
-    //loc.col = 0;
-
     if (remaining_fields.count > 0) {
         s_push_cstr(&config_log, "\nWARNING: the following fields have not been set:\n");
         da_foreach(remaining_fields, ConfigField, field) {
@@ -1834,6 +1761,7 @@ void load_config()
         s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", command->name);
     }
 
+    // TODO: make a simple interactive 'less' just to navigate pages
     if (!s_is_empty(config_log)) {
         s_push_null(&config_log);
         printw(config_log.items);
