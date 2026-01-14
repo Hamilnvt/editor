@@ -16,6 +16,7 @@
 #include <math.h>
 #include <ncurses.h>
 #include <stddef.h>
+#include <sys/wait.h>
 
 #define STRINGS_IMPLEMENTATION
 #include "strings.h"
@@ -271,15 +272,17 @@ static_assert(BUILTIN_CMDS_COUNT == 14, "Associate a name to all builtin command
 
 typedef enum
 {
-    ARG_INT,
-    ARG_UINT,
-    ARG_STRING,
-    ARG_PLACEHOLDER
-} CommandArgType;
+    PISQUY_INT,
+    PISQUY_UINT,
+    PISQUY_STRING,
+    PISQUY_BOOL,
+    PISQUY_ARG_PLACEHOLDER,
+    PISQUY_TYPES_COUNT
+} PisquyType;
 
 typedef struct
 {
-    CommandArgType type;
+    PisquyType type;
     union {
         int int_value;
         size_t uint_value;
@@ -293,7 +296,7 @@ typedef struct
 CommandArg make_command_arg_int(int value, size_t index, char *name) 
 {
     return (CommandArg){
-        .type = ARG_INT,
+        .type = PISQUY_INT,
         .int_value = value,
         .index = index,
         .name = strdup(name)
@@ -303,7 +306,7 @@ CommandArg make_command_arg_int(int value, size_t index, char *name)
 CommandArg make_command_arg_uint(size_t value, size_t index, char *name) 
 {
     return (CommandArg){
-        .type = ARG_UINT,
+        .type = PISQUY_UINT,
         .uint_value = value,
         .index = index,
         .name = strdup(name)
@@ -313,7 +316,7 @@ CommandArg make_command_arg_uint(size_t value, size_t index, char *name)
 CommandArg make_command_arg_string(char *value, size_t index, char *name) 
 {
     return (CommandArg){
-        .type = ARG_STRING,
+        .type = PISQUY_STRING,
         .string_value = strdup(value),
         .index = index,
         .name = strdup(name)
@@ -336,7 +339,7 @@ CommandArgs deep_copy_command_args(const CommandArgs *args)
     for (size_t i = 0; i < args->count; i++) {
         copy.items[i] = args->items[i];
         copy.items[i].name = strdup(args->items[i].name);
-        if (args->items[i].type == ARG_STRING) {
+        if (args->items[i].type == PISQUY_STRING) {
             copy.items[i].string_value = strdup(args->items[i].string_value);
         }
     }
@@ -478,7 +481,7 @@ int get_command_index(const Command *cmd)
 void free_command_arg(CommandArg *arg)
 {
     if (arg->name) free(arg->name);
-    if (arg->type == ARG_STRING) free(arg->string_value);
+    if (arg->type == PISQUY_STRING) free(arg->string_value);
 }
 
 void free_command_args(CommandArgs *args)
@@ -528,7 +531,7 @@ typedef struct
 } Location;
 
 #define LOC_FMT "%s:%zu:%zu:"
-#define LOC_ARG(loc) (loc).path, (loc).row, (loc).col
+#define LOC_ARG(loc) ((loc).path), ((loc).row+1), ((loc).col+1)
 
 size_t trim_left(char **str)
 {
@@ -572,6 +575,26 @@ char *read_file(char *path)
     return content;
 }
 
+typedef struct
+{
+    PisquyType type;
+    union {
+        int int_value;
+        size_t uint_value;
+        char *string_value;
+        bool bool_value;
+    };
+    char *name;
+} Var;
+
+typedef struct
+{
+    Var *items;
+    size_t count;
+    size_t capacity;
+} Vars;
+static Vars vars = {0};
+
 typedef enum
 {
     TOKEN_IDENT = 256,
@@ -583,7 +606,9 @@ typedef enum
 
     TOKEN_SET,
     TOKEN_VAR,
+    TOKEN_DEF,
 
+    TOKEN_NEWLINE,
     TOKEN_EOF,
     TOKENS_COUNT
 } TokenType;
@@ -599,7 +624,7 @@ typedef struct
     Location loc;
 } Token;
 
-static_assert(ACTUAL_TOKENS_COUNT == 8, "token_type_as_cstr");
+static_assert(ACTUAL_TOKENS_COUNT == 10, "token_type_as_cstr");
 char *token_type_as_cstr(TokenType type)
 {
     if (type >= 0 && type <= 255) {
@@ -608,20 +633,22 @@ char *token_type_as_cstr(TokenType type)
     } else {
         switch (type)
         {
-            case TOKEN_IDENT:  return "identifier";
-            case TOKEN_NUMBER: return "number";
-            case TOKEN_STRING: return "string";
-            case TOKEN_TRUE:   return "true";
-            case TOKEN_FALSE:  return "false";
-            case TOKEN_SET:    return "set";
-            case TOKEN_VAR:    return "var";
-            case TOKEN_EOF:    return "EOF";
-            default:           return NULL;
+            case TOKEN_IDENT:   return "identifier";
+            case TOKEN_NUMBER:  return "number";
+            case TOKEN_STRING:  return "string";
+            case TOKEN_TRUE:    return "true";
+            case TOKEN_FALSE:   return "false";
+            case TOKEN_SET:     return "set";
+            case TOKEN_VAR:     return "var";
+            case TOKEN_DEF:     return "def";
+            case TOKEN_NEWLINE: return "new line";
+            case TOKEN_EOF:     return "EOF";
+            default:            return NULL;
         }
     }
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 8, "token_type_and_value_as_str");
+static_assert(ACTUAL_TOKENS_COUNT == 10, "token_type_and_value_as_str");
 char *token_type_and_value_as_str(Token token)
 {
     const size_t n = 128;
@@ -644,6 +671,8 @@ char *token_type_and_value_as_str(Token token)
             case TOKEN_FALSE:
             case TOKEN_SET:
             case TOKEN_VAR:
+            case TOKEN_DEF:
+            case TOKEN_NEWLINE:
             case TOKEN_EOF:
                 sprintf(result, "%s", type);
                 break;
@@ -661,16 +690,24 @@ void token_log(Token token)
 }
 
 #define NO_LOG NULL
+#define EXTRA_NEWLINE true
 bool expect_token_to_be_of_type(Token t, TokenType type, String *s_log)
 {
     if (t.type == type) return true;
 
     if (s_log) {
         char *tokstrval = token_type_and_value_as_str(t);
-        s_push_fstr(s_log, LOC_FMT" ERROR: expecting %s but got %s\n", LOC_ARG(t.loc),
+        s_push_fstr(s_log, LOC_FMT"\n- ERROR: expecting %s but got %s\n", LOC_ARG(t.loc),
                 token_type_as_cstr(type), tokstrval);
         free(tokstrval);
     }
+    return false;
+}
+
+bool expect_token_to_be_of_type_extra_newline(Token t, TokenType type, String *s_log)
+{
+    if (expect_token_to_be_of_type(t, type, s_log)) return true;
+    if (s_log) s_push(s_log, '\n');
     return false;
 }
 
@@ -682,7 +719,7 @@ bool expect_token_to_be_of_types(Token t, TokenType *types, size_t n, String *s_
         if (t.type == types[i]) return true;
 
     if (s_log) {
-        s_push_fstr(s_log, LOC_FMT" ERROR: expecting one of the following tokens ", LOC_ARG(t.loc));
+        s_push_fstr(s_log, LOC_FMT"\n- ERROR: expecting one of the following tokens ", LOC_ARG(t.loc));
         for (size_t i = 0; i < n; i++) {
             s_push_fstr(s_log, "`%s`", token_type_as_cstr(types[i]));
             if (i < n-1) s_push_fstr(s_log, ", ");
@@ -691,6 +728,13 @@ bool expect_token_to_be_of_types(Token t, TokenType *types, size_t n, String *s_
         s_push_fstr(s_log, " but got %s\n", tokstrval);
         free(tokstrval);
     }
+    return false;
+}
+
+bool expect_token_to_be_of_types_extra_newline(Token t, TokenType *types, size_t n, String *s_log)
+{
+    if (expect_token_to_be_of_types(t, types, n, s_log)) return true;
+    if (s_log) s_push(s_log, '\n');
     return false;
 }
 
@@ -719,11 +763,8 @@ Lexer lexer_create(char *path)
 void lexer_trim_left(Lexer *l)
 {
     if (!l->str) return;
-    while (isspace(*l->str)) {
-        if (*l->str == '\n') {
-            l->loc.col = 0;
-            l->loc.row++;
-        } else l->loc.col++;
+    while (*l->str && isblank(*l->str)) {
+        l->loc.col++;
         l->str++;
     }
 }
@@ -733,10 +774,6 @@ void lexer_skip_comment(Lexer *l)
     while (l->str && *l->str && *l->str != '\n') {
         l->str++;
         l->loc.col++;
-    }
-    if (*l->str == '\n') {
-        l->loc.col = 0;
-        l->loc.row++;
     }
 }
 
@@ -752,14 +789,16 @@ bool lexer_string(Lexer *l)
     l->token.string_value = malloc(sizeof(char)*len + 1);
     strncpy(l->token.string_value, begin, len);
     l->token.string_value[len] = '\0';
-    l->str = end;
+    l->str = end+1;
     l->loc.col += len;
     return true;
 }
 
+static_assert(ACTUAL_TOKENS_COUNT == 10, "lexer_next");
 bool lexer_next(Lexer *l)
 {
     if (!l->str) return false;
+
     lexer_trim_left(l);
 
     char c = *l->str;
@@ -767,7 +806,12 @@ bool lexer_next(Lexer *l)
 
     l->token.loc = l->loc;
 
-    if (c == '/') {
+    if (c == '\n') {
+        l->token.type = TOKEN_NEWLINE;
+        l->loc.col = 0;
+        l->loc.row++;
+        l->str++;
+    } else if (c == '/') {
         l->str++;
         char second = *l->str;
         if (second != '/') {
@@ -790,6 +834,9 @@ bool lexer_next(Lexer *l)
         l->loc.col += len;
         if      (strneq(begin, "set", len)) l->token.type = TOKEN_SET;
         else if (strneq(begin, "var", len)) l->token.type = TOKEN_VAR;
+        else if (strneq(begin, "def", len)) l->token.type = TOKEN_DEF;
+        else if (strneq(begin, "true", len)) l->token.type = TOKEN_TRUE;
+        else if (strneq(begin, "false", len)) l->token.type = TOKEN_FALSE;
         else {
             l->token.type = TOKEN_IDENT;
             l->token.string_value = malloc(sizeof(char)*len + 1);
@@ -813,7 +860,7 @@ bool lexer_next(Lexer *l)
     return true;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 8, "lexer_get_current_token");
+static_assert(ACTUAL_TOKENS_COUNT == 10, "lexer_get_current_token");
 Token lexer_get_current_token(Lexer *l)
 {
     Token token = l->token;
@@ -828,6 +875,8 @@ Token lexer_get_current_token(Lexer *l)
     case TOKEN_FALSE:
     case TOKEN_SET:
     case TOKEN_VAR:
+    case TOKEN_DEF:
+    case TOKEN_NEWLINE:
     case TOKEN_EOF:
         break;
 
@@ -842,7 +891,7 @@ Token lexer_get_current_token(Lexer *l)
     return token;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 8, "free_token");
+static_assert(ACTUAL_TOKENS_COUNT == 10, "free_token");
 void free_token(Token *token)
 {
     if (token->loc.path) free(token->loc.path);
@@ -855,6 +904,14 @@ void free_token(Token *token)
 
     default: {}
     }
+}
+
+void free_tokens(Tokens *tokens)
+{
+    da_foreach (*tokens, Token, token) {
+        free_token(token);
+    }
+    da_free(tokens);
 }
 
 void lexer_free_current_token(Lexer *l)
@@ -1427,24 +1484,23 @@ void load_config()
 
     String config_log = {0};
 
-    const char *config_path = ".config/editor/config";
+    const char *config_path = ".config/editor/config.pisquy";
     char full_config_path[256] = {0};
     sprintf(full_config_path, "%s/%s", home, config_path);
     FILE *config_file = fopen(full_config_path, "r");
     if (config_file == NULL) {
-        s_push_fstr(&config_log, "WARNING: config file not found at %s\n", full_config_path);
+        s_push_fstr(&config_log, "WARNING: config file not found at %s\n\n", full_config_path);
         config_file = fopen(full_config_path, "w+");
         if (config_file == NULL) {
-            s_push_fstr(&config_log, "ERROR: could not create config file\n");
-            s_print(config_log);
-            exit(1);
+            s_push_fstr(&config_log, "ERROR: could not create config file\n\n");
+            goto load_config_fail;
         }
 
-        fprintf(config_file, "quit_times: %zu\t// times you need to press CTRL-q before exiting without saving\n",
+        fprintf(config_file, "set quit_times = %zu\t// times you need to press CTRL-q before exiting without saving\n",
                 default_quit_times); // TODO: make the description a macro/const
-        fprintf(config_file, "msg_lifetime: %zu\t// time in seconds of the duration of a message\n",
+        fprintf(config_file, "set msg_lifetime = %zu\t// time in seconds of the duration of a message\n",
                 default_msg_lifetime);
-        fprintf(config_file, "line_numbers: %s\t// display line numbers at_all, absolute or relative to the current line\n",
+        fprintf(config_file, "set line_numbers = %s\t// display line numbers at_all, absolute or relative to the current line\n",
                 valid_values_line_numbers.items[default_line_numbers]);
 
         s_push_fstr(&config_log, "NOTE: default config file has been created\n\n");
@@ -1458,17 +1514,17 @@ void load_config()
     da_push(&remaining_fields, create_field_limited_string("line_numbers", (LimitedStringIndex *)&config.line_numbers,
                 default_line_numbers, valid_values_line_numbers));
     
-    //if (DEBUG) {
-    //    for (size_t i = 0; i < remaining_fields.count; i++) {
-    //        const ConfigField *field = &remaining_fields.items[i];
-    //        printf("Field { name: `%s`, type: `%s` }\n", field->name, fieldtype_to_string(field->type));
-    //    }
-    //}
+    if (DEBUG) {
+        for (size_t i = 0; i < remaining_fields.count; i++) {
+            const ConfigField *field = &remaining_fields.items[i];
+            s_push_fstr(&config_log, "Field { name: `%s`, type: `%s` }\n",
+                    field->name, fieldtype_to_string(field->type));
+        }
+        s_push(&config_log, '\n');
+    }
 
     ConfigFields inserted_fields = {0};
-    (void)inserted_fields;
 
-    // commands initialization
     commands = (Commands){0};
     static_assert(BUILTIN_CMDS_COUNT == 14, "Add all builtin commands in commands");
     add_builtin_command(SAVE,              BUILTIN_SAVE,              builtin_save,              NULL);
@@ -1502,21 +1558,22 @@ void load_config()
     add_builtin_command(DATE,              BUILTIN_DATE,              builtin_date,              NULL);
     add_builtin_command(GOTO_LINE,         BUILTIN_GOTO_LINE,         builtin_goto_line,         NULL);
 
-    // TODO: free baked_args
+    free_command_args(&baked_args);
 
     Tokens tokens = lex_file(full_config_path);
 
     for (size_t i = 0; i < tokens.count; i++) {
         Token first_token = tokens.items[i];
+
         switch (first_token.type)
         {
         case TOKEN_SET: {
             i++;
             Token token_field_name = tokens.items[i];
-            if (!expect_token_to_be_of_type(token_field_name, TOKEN_IDENT, &config_log)) continue;
+            if (!expect_token_to_be_of_type_extra_newline(token_field_name, TOKEN_IDENT, &config_log)) continue;
             i++;
             Token token_equals = tokens.items[i];
-            if (!expect_token_to_be_of_type(token_equals, '=', &config_log)) continue;
+            if (!expect_token_to_be_of_type_extra_newline(token_equals, '=', &config_log)) continue;
             char *field_name = token_field_name.string_value;
             i++;
             Token token_field_value = tokens.items[i];
@@ -1535,8 +1592,8 @@ void load_config()
                             bool value;
                             const TokenType TOKEN_BOOL[2] = {TOKEN_TRUE, TOKEN_FALSE};
                             if (!expect_token_to_be_of_types(token_field_value, TOKEN_BOOL, 2, &config_log)) {
-                                s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to `%s`\n",
-                                        LOC_ARG(token_field_value.loc), removed_field.bool_default ? "true" : "false");
+                                s_push_fstr(&config_log, "- NOTE: defaulted to `%s`\n\n",
+                                        removed_field.bool_default ? "true" : "false");
                                 value = removed_field.bool_default;
                             }
                             if (token_field_value.type == TOKEN_TRUE) value = true;
@@ -1548,10 +1605,8 @@ void load_config()
                             size_t value = token_field_value.number_value;
                             if (!expect_token_to_be_of_type(token_field_value, TOKEN_NUMBER, &config_log)
                                 || value <= 0) {
-                                s_push_fstr(&config_log, LOC_FMT" NOTE: value must be > 0\n",
-                                        LOC_ARG(token_field_value.loc));
-                                s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to `%zu`\n",
-                                        LOC_ARG(token_field_value.loc), removed_field.uint_default);
+                                s_push_cstr(&config_log, "- NOTE: value must be > 0\n");
+                                s_push_fstr(&config_log, "- NOTE: defaulted to `%zu`\n\n", removed_field.uint_default);
                                 value = removed_field.uint_default;
                             }
                             *removed_field.uint_ptr = value;
@@ -1560,10 +1615,9 @@ void load_config()
                         case FIELD_STRING: {
                             char *value;
                             if (!expect_token_to_be_of_type(token_field_value, TOKEN_STRING, &config_log) || strlen(value) == 0) {
-                                s_push_fstr(&config_log, LOC_FMT" NOTE: value must be a non empty string\n",
-                                        LOC_ARG(token_field_value.loc));
-                                s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to \"%s\"\n",
-                                        LOC_ARG(token_field_value.loc), removed_field.string_default);
+                                s_push_cstr(&config_log, "- NOTE: value must be a non empty string\n");
+                                s_push_fstr(&config_log, "- NOTE: defaulted to \"%s\"\n\n",
+                                        removed_field.string_default);
                                 value = strdup(removed_field.string_default);
                             } else value = strdup(token_field_value.string_value);
                             *removed_field.string_ptr = value;
@@ -1571,9 +1625,9 @@ void load_config()
 
                         case FIELD_LIMITED_STRING: {
                             char *value = token_field_value.string_value;
-                            // TODO: non mi piace che sia TOKEN_STRING perche' significa che lo devo mettere tra virgolette, sarebbe meglio TOKEN_IDENT
-                            bool is_wrong_token_type = !expect_token_to_be_of_type(token_field_value,
-                                    TOKEN_STRING, NO_LOG);
+                            TokenType LIMITED_STRING_TOKENS[2] = {TOKEN_IDENT, TOKEN_STRING};
+                            bool is_wrong_token_type = !expect_token_to_be_of_types(token_field_value,
+                                    LIMITED_STRING_TOKENS, 2, NO_LOG);
                             bool is_str_empty = strlen(value) == 0;
                             LimitedStringIndex index = -1;
                             if (!is_wrong_token_type && !is_str_empty) {
@@ -1587,15 +1641,14 @@ void load_config()
                             bool is_not_valid = index == -1;
                             if (is_wrong_token_type || is_str_empty || is_not_valid) {
                                 if (is_wrong_token_type) {
-                                    expect_token_to_be_of_type(token_field_value, TOKEN_STRING, &config_log);
+                                    expect_token_to_be_of_types(token_field_value, LIMITED_STRING_TOKENS, 2, &config_log);
                                 } else if (is_str_empty) {
-                                    s_push_fstr(&config_log, LOC_FMT" ERROR: ...\n");
+                                    s_push_fstr(&config_log, LOC_FMT"- ERROR: empty string\n");
                                 } else if (is_not_valid) {
-                                    s_push_fstr(&config_log, LOC_FMT" ERROR: ...\n");
+                                    s_push_fstr(&config_log, LOC_FMT"- ERROR: string not valid\n");
                                 }
-                                s_push_fstr(&config_log, LOC_FMT" NOTE: value must be a non empty string among one of the following values: ",
-                                        LOC_ARG(token_field_value.loc));
-
+                                s_push_fstr(&config_log,
+                                        "- NOTE: value must be a non empty string among one of the following values: ");
                                 size_t count = removed_field.limited_string_valid_values.count;
                                 for (size_t i = 0; i < count; i++) {
                                     s_push_fstr(&config_log, "`%s`", removed_field.limited_string_valid_values.items[i]);
@@ -1604,8 +1657,7 @@ void load_config()
                                     else s_push_fstr(&config_log, "\n");
                                 }
 
-                                s_push_fstr(&config_log, LOC_FMT" NOTE: defaulted to \"%s\"\n",
-                                        LOC_ARG(token_field_value.loc), removed_field.limited_string_valid_values.items[removed_field.limited_string_default]);
+                                s_push_fstr(&config_log, "- NOTE: defaulted to `%s`\n\n", removed_field.limited_string_valid_values.items[removed_field.limited_string_default]);
                                 *removed_field.limited_string_ptr = removed_field.limited_string_default;
                             } else {
                                 *removed_field.limited_string_ptr = index;
@@ -1622,7 +1674,7 @@ void load_config()
                 size_t k = 0;
                 while (!found && k < inserted_fields.count) {
                     if (streq(field_name, inserted_fields.items[k].name)) {
-                        s_push_fstr(&config_log, LOC_FMT" ERROR: redeclaration of field `%s`\n",
+                        s_push_fstr(&config_log, LOC_FMT"- ERROR: redeclaration of field `%s`\n\n",
                                 LOC_ARG(token_field_name.loc), field_name);
                         found = true;
                     } else k++;
@@ -1630,50 +1682,134 @@ void load_config()
             }
 
             if (!found) {
-                s_push_fstr(&config_log, LOC_FMT" ERROR: unknown field `%s`\n",
+                s_push_fstr(&config_log, LOC_FMT"- ERROR: unknown field `%s`\n\n",
                         LOC_ARG(token_field_name.loc), field_name);
             }
         } break;
 
         case TOKEN_VAR: {
-            // TODO
+            i++;
+            Token token_var_name = tokens.items[i];
+            if (!expect_token_to_be_of_type_extra_newline(token_var_name, TOKEN_IDENT, &config_log)) continue;
+            char *var_name = token_var_name.string_value;
+            bool found = false;
+            for (size_t j = 0; j < vars.count; j++) {
+                if (streq(var_name, vars.items[i].name)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                s_push_fstr(&config_log, LOC_FMT"\n- ERROR: redeclaration of variable `%s`\n",
+                        LOC_ARG(token_var_name.loc), var_name);
+                continue;
+            }
+            i++;
+            Token token_equals = tokens.items[i];
+            if (!expect_token_to_be_of_type_extra_newline(token_equals, '=', &config_log)) continue;
+            i++;
+            Token token_var_value = tokens.items[i];
+            TokenType VAR_VALUE_TOKENS[5] = {TOKEN_IDENT, TOKEN_NUMBER, TOKEN_STRING, TOKEN_TRUE, TOKEN_FALSE}; 
+            if (!expect_token_to_be_of_types_extra_newline(token_var_value, VAR_VALUE_TOKENS, 5, &config_log)) continue;
+            Var var = {0};
+            var.name = strdup(var_name);
+            switch (token_var_value.type)
+            {
+            case TOKEN_IDENT:
+                // TODO: check if there is a variable with this name else treat it like a string? not so sure
+                s_push_fstr(&config_log, LOC_FMT"- TODO: assign identifier to variable '%s'",
+                        LOC_ARG(token_var_value.loc), var_name);
+                break;
+
+            case TOKEN_NUMBER:
+                if (token_var_value.number_value > 0) {
+                    var.type = PISQUY_UINT;
+                    var.uint_value = token_var_value.number_value;
+                } else {
+                    var.type = PISQUY_INT;
+                    var.int_value = token_var_value.number_value;
+                }
+                break;
+
+            case TOKEN_STRING:
+                var.type = PISQUY_STRING;
+                var.string_value = strdup(token_var_value.string_value);
+                break;
+
+            case TOKEN_TRUE:
+                var.type = PISQUY_BOOL;
+                var.bool_value = true;
+                break;
+
+            case TOKEN_FALSE:
+                var.type = PISQUY_BOOL;
+                var.bool_value = false;
+                break;
+
+            default: print_error_and_exit("Unreachable token type parsing variable value in load_config");
+            }
+            da_push(&vars, var);
         } break;
 
-        case '#': {
+        case TOKEN_DEF: {
             i++;
-            Token token_command_name= tokens.items[i];
-            if (!expect_token_to_be_of_type(token_command_name, TOKEN_IDENT, &config_log)) continue;
+            Token token_command_name = tokens.items[i];
+            char *command_name = token_command_name.string_value;
+            bool already_defined = false;
+            da_enumerate(commands, Command, i, command) {
+                if (streq(command_name, command->name)) {
+                    s_push_fstr(&config_log, LOC_FMT"\n- ERROR: redeclaration of %s command `%s`\n\n",
+                            LOC_ARG(token_command_name.loc), i < BUILTIN_CMDS_COUNT ? "builtin" : "user defined",
+                            command_name); 
+                    already_defined = true;
+                    break;
+                }
+            }
+            if (already_defined) continue;
+            if (!expect_token_to_be_of_type_extra_newline(token_command_name, TOKEN_IDENT, &config_log)) continue;
             i++;
             Token token_colon = tokens.items[i];
-            if (!expect_token_to_be_of_type(token_colon, ':', &config_log)) continue;
-            i++;
-            while (true) {
-                s_push_fstr(&config_log, "TODO: parse commands list");
-                break;
-                //
+            if (!expect_token_to_be_of_type_extra_newline(token_colon, ':', &config_log)) continue;
 
-                Token t = tokens.items[i];
+            Command user_defined_cmd = {0};
+            i++;
+            Token tok_it = tokens.items[i];
+            while (tok_it.type != TOKEN_NEWLINE) {
                 size_t n = 1; (void)n; // TODO
-                if (t.type == TOKEN_NUMBER) {
-                    if (t.number_value <= 0) {
-                        s_push_fstr(&config_log, LOC_FMT" ERROR: multiplicity number should be > 0 (got %d)",
-                                LOC_ARG(t.loc), t.number_value);
+                if (tok_it.type == TOKEN_NUMBER) {
+                    if (tok_it.number_value <= 0) {
+                        s_push_fstr(&config_log, LOC_FMT"\n- ERROR: multiplicity number should be > 0 (got %d)\n\n",
+                                LOC_ARG(tok_it.loc), tok_it.number_value);
                         break;
                     }
-                    n = t.number_value;
+                    n = tok_it.number_value;
                     i++;
-                    t = tokens.items[i];
+                    tok_it = tokens.items[i];
                 }
-                if (!expect_token_to_be_of_type(t, TOKEN_IDENT, &config_log)) continue;
+                if (!expect_token_to_be_of_type_extra_newline(tok_it, TOKEN_IDENT, &config_log)) break;
+
+                i++;
+                tok_it = tokens.items[i];
             }
+            user_defined_cmd.name = strdup(command_name);
+            add_user_command(user_defined_cmd);
         } break;
+
+        case TOKEN_NEWLINE: break;
+            
+        case TOKEN_EOF: 
+            assert(i == tokens.count-1);
+            break;
 
         default:
             char *tokstrval = token_type_and_value_as_str(first_token);
-            s_push_fstr(&config_log, LOC_FMT" ERROR: Unexpected %s\n", LOC_ARG(first_token.loc), tokstrval);
+            s_push_fstr(&config_log, LOC_FMT"\n- ERROR: unexpected %s\n\n", LOC_ARG(first_token.loc), tokstrval);
             free(tokstrval);
         }
     }
+
+    free_tokens(&tokens);
+
     //char *colon = NULL;
     //if (*line == '#') {
     //    line++;
@@ -1756,25 +1892,51 @@ void load_config()
         }
     }
 
-    s_push_fstr(&config_log, "\nDefined commands:\n");
-    da_enumerate (commands, Command, i, command) {
-        s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", command->name);
+    if (DEBUG) {
+        s_push_fstr(&config_log, "\nDefined commands:\n");
+        da_enumerate (commands, Command, i, command) {
+            s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", command->name);
+        }
     }
 
-    // TODO: make a simple interactive 'less' just to navigate pages
-    if (!s_is_empty(config_log)) {
-        s_push_null(&config_log);
-        printw(config_log.items);
-        s_free(&config_log);
-        printw("\n");
-        printw("- Press ENTER to continue ignoring errors and warnings\n");
-        printw("- Press ESC to exit\n");
-        int key;
-        while (true) {
-            key = getch();
-            if (key == ENTER) break;
-            else if (key == ESC) exit(1);
-        }
+load_config_fail:
+    if (s_is_empty(config_log)) return;
+
+    char tmp_filename[] = "/tmp/editor_config_log_XXXXXX";
+    int fd = mkstemp(tmp_filename);
+    if (fd == -1) print_error_and_exit("Could not create temporary file\n");
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        print_error_and_exit("Could not open temporary file\n"); 
+    }
+
+    s_push_null(&config_log);
+    fputs(config_log.items, f);
+    s_free(&config_log);
+    fclose(f);
+
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "cat %s | less", tmp_filename);
+
+    pid_t child = fork();
+    switch (child)
+    {
+    case -1: print_error_and_exit("Could not create child process to execute cmd\n");
+    case 0:
+        execl("/bin/sh", "sh", "-c", cmd, NULL);
+        exit(0);
+    default: waitpid(child, NULL, 0);
+    }
+
+    clear();
+    printw("- Press ENTER to continue ignoring errors and warnings\n");
+    printw("- Press ESC to exit\n");
+    int key;
+    while (true) {
+        key = getch();
+        if (key == ENTER) break;
+        else if (key == ESC) exit(1);
     }
 }
 
@@ -2371,7 +2533,7 @@ void execute_command(Command *cmd, CommandArgs *runtime_args)
         for (size_t i = 0; i < cmd->baked_args.count; i++) {
             log_this("baked argument %zu", i);
             CommandArg arg = cmd->baked_args.items[i];
-            if (arg.type == ARG_PLACEHOLDER) {
+            if (arg.type == PISQUY_ARG_PLACEHOLDER) {
                 if (runtime_args && arg.placeholder_index < runtime_args->count) {
                     da_push(&final_args, runtime_args->items[arg.placeholder_index]);
                 } else {
