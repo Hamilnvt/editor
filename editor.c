@@ -87,11 +87,7 @@ static Editor editor = {0};
 #define N_PAGES (editor.rows.count/win_main.height + 1)
 
 /* ANSI escape sequences */
-#define ANSI_GO_HOME_CURSOR "\x1B[H"
-#define ANSI_SHOW_CURSOR "\x1b[?25h"
-#define ANSI_HIDE_CURSOR "\x1b[?25l"
 #define ANSI_ERASE_LINE_FROM_CURSOR "\x1b[K"
-#define ANSI_CLEAR_SCREEN "\x1b[2J"
 #define ANSI_INVERSE "\x1b[7m"
 #define ANSI_FG_COLOR(rgb_color) "\x1b[38;2;"rgb_color"m"
 #define ANSI_RESET "\x1b[0m"
@@ -249,6 +245,7 @@ typedef enum
     BUILTIN_GOTO_LINE,
     BUILTIN_CMDS_COUNT,
     UNKNOWN,
+    ERROR,
     COMMAND_FROM_LINE,
     USER_DEFINED,
 } CommandType;
@@ -266,7 +263,7 @@ static_assert(BUILTIN_CMDS_COUNT == 14, "Associate a name to all builtin command
 #define MOVE_CURSOR_RIGHT "mvr"
 #define MOVE_LINE_UP      "mvlu"
 #define MOVE_LINE_DOWN    "mvld"
-#define INSERT            "i"
+#define INSERT            "ins"
 #define DATE              "date"
 #define GOTO_LINE         "goto"
 
@@ -293,42 +290,45 @@ typedef struct
     char *name;
 } CommandArg;
 
-CommandArg make_command_arg_int(int value, size_t index, char *name) 
-{
-    return (CommandArg){
-        .type = PISQUY_INT,
-        .int_value = value,
-        .index = index,
-        .name = strdup(name)
-    };
-}
-
-CommandArg make_command_arg_uint(size_t value, size_t index, char *name) 
-{
-    return (CommandArg){
-        .type = PISQUY_UINT,
-        .uint_value = value,
-        .index = index,
-        .name = strdup(name)
-    };
-}
-
-CommandArg make_command_arg_string(char *value, size_t index, char *name) 
-{
-    return (CommandArg){
-        .type = PISQUY_STRING,
-        .string_value = strdup(value),
-        .index = index,
-        .name = strdup(name)
-    };
-}
-
 typedef struct
 {
     CommandArg *items;
     size_t count;
     size_t capacity;
 } CommandArgs;
+
+void add_command_arg_int(CommandArgs *args, char *name, int value)
+{
+    CommandArg arg = {
+        .type = PISQUY_INT,
+        .name = strdup(name),
+        .int_value = value,
+        .index = args->count
+    };
+    da_push(args, arg);
+}
+
+void add_command_arg_uint(CommandArgs *args, char *name, size_t value)
+{
+    CommandArg arg = {
+        .type = PISQUY_UINT,
+        .name = strdup(name),
+        .uint_value = value,
+        .index = args->count
+    };
+    da_push(args, arg);
+}
+
+void add_command_arg_string(CommandArgs *args, char *name, char *value)
+{
+    CommandArg arg = {
+        .type = PISQUY_STRING,
+        .name = strdup(name),
+        .string_value = strdup(value),
+        .index = args->count
+    };
+    da_push(args, arg);
+}
 
 CommandArgs deep_copy_command_args(const CommandArgs *args)
 {
@@ -368,6 +368,13 @@ struct Command
 };
 
 static Commands commands = {0}; // NOTE: all commands are stored in here
+#define USER_CMDS_COUNT (commands.count - BUILTIN_CMDS_COUNT)
+
+bool is_command_type_builtin(CommandType type) { return type >= 0 && type < BUILTIN_CMDS_COUNT; }
+bool is_command_type_user_defined(CommandType type)
+{
+    return type >= USER_DEFINED && type < USER_DEFINED + USER_CMDS_COUNT;
+}
 
 typedef struct
 {
@@ -418,8 +425,6 @@ void commands_history_next()
     editor.cmd_pos = len;
 }
 
-#define USER_CMDS_COUNT (commands.count - BUILTIN_CMDS_COUNT)
-
 bool expect_n_arguments(Command *cmd, CommandArgs *args, size_t n)
 {
     if (args->count == n) return true;
@@ -429,9 +434,9 @@ bool expect_n_arguments(Command *cmd, CommandArgs *args, size_t n)
     return false;
 }
 
-CommandType parse_cmdtype(char *type)
+static_assert(BUILTIN_CMDS_COUNT == 14, "Parse all commands in get_command_type_from_string");
+CommandType get_command_type_from_string(char *type)
 {
-    static_assert(BUILTIN_CMDS_COUNT == 14, "Parse all commands in parse_cmd");
     if      (streq(type, SAVE))              return BUILTIN_SAVE;
     else if (streq(type, QUIT))              return BUILTIN_QUIT;
     else if (streq(type, SAVE_AND_QUIT))     return BUILTIN_SAVE_AND_QUIT;
@@ -447,11 +452,56 @@ CommandType parse_cmdtype(char *type)
     else if (streq(type, DATE))              return BUILTIN_DATE;
     else if (streq(type, GOTO_LINE))         return BUILTIN_GOTO_LINE;
     else {
-        for (size_t i = BUILTIN_CMDS_COUNT; i < commands.count; i++) {
+        for (size_t i = USER_DEFINED; i < commands.count; i++) {
             if (streq(type, commands.items[i].name))
-                return USER_DEFINED + i - BUILTIN_CMDS_COUNT;
+                return i;
         }
         return UNKNOWN;
+    }
+}
+
+int get_command_index(CommandType type)
+{
+    if (is_command_type_builtin(type))      return type;
+    if (is_command_type_user_defined(type)) return type - USER_DEFINED + BUILTIN_CMDS_COUNT;
+    return -1;
+}
+
+Command *get_command(CommandType type)
+{
+    int index = get_command_index(type);
+    if (index == -1) return NULL;
+    return &commands.items[index];
+}
+
+static_assert(BUILTIN_CMDS_COUNT == 14, "get_command_type_as_cstr");
+char *get_command_type_as_cstr(CommandType type)
+{
+    switch (type)
+    {
+        case BUILTIN_SAVE:              return SAVE;
+        case BUILTIN_QUIT:              return QUIT;
+        case BUILTIN_SAVE_AND_QUIT:     return SAVE_AND_QUIT;
+        case BUILTIN_FORCE_QUIT:        return FORCE_QUIT;
+        case BUILTIN_MOVE_CURSOR:       return MOVE_CURSOR;
+        case BUILTIN_MOVE_CURSOR_UP:    return MOVE_CURSOR_UP;
+        case BUILTIN_MOVE_CURSOR_DOWN:  return MOVE_CURSOR_DOWN;
+        case BUILTIN_MOVE_CURSOR_LEFT:  return MOVE_CURSOR_LEFT;
+        case BUILTIN_MOVE_CURSOR_RIGHT: return MOVE_CURSOR_RIGHT;
+        case BUILTIN_MOVE_LINE_UP:      return MOVE_LINE_UP;
+        case BUILTIN_MOVE_LINE_DOWN:    return MOVE_LINE_DOWN;
+        case BUILTIN_INSERT:            return INSERT;
+        case BUILTIN_DATE:              return DATE;
+        case BUILTIN_GOTO_LINE:         return GOTO_LINE;
+        case UNKNOWN:                   return "unknown";
+
+        case BUILTIN_CMDS_COUNT:
+        case ERROR:
+        case COMMAND_FROM_LINE:
+        case USER_DEFINED:
+        default:
+            if (is_command_type_user_defined(type)) return get_command(type)->name;
+            else print_error_and_exit("Unreachable command type %u in get_command_type_as_cstr", type);
     }
 }
 
@@ -465,17 +515,10 @@ void add_builtin_command(char *name, CommandType type, CommandFn execute, Comman
     da_push(&commands, cmd);
 }
 
-void add_user_command(Command cmd)
+void add_user_defined_command(Command cmd)
 {
     cmd.type = USER_DEFINED + commands.count - BUILTIN_CMDS_COUNT;
     da_push(&commands, cmd);
-}
-
-int get_command_index(const Command *cmd)
-{
-    if (cmd->type >= USER_DEFINED) return cmd->type - USER_DEFINED + BUILTIN_CMDS_COUNT;
-    else if (cmd->type >= 0 && cmd->type < BUILTIN_CMDS_COUNT) return cmd->type;
-    else return -1;
 }
 
 void free_command_arg(CommandArg *arg)
@@ -494,7 +537,7 @@ void free_command_args(CommandArgs *args)
 void free_commands(Commands *cmds);
 void free_command(Command *cmd)
 {
-    if (cmd->type > BUILTIN_CMDS_COUNT && cmd->type != COMMAND_FROM_LINE)
+    if (is_command_type_user_defined(cmd->type))
         free(cmd->name);
     if (cmd->baked_args.count > 0)
         free_command_args(&cmd->baked_args);
@@ -508,20 +551,6 @@ void free_commands(Commands *cmds)
         free_command(cmd);
     da_free(cmds);
 }
-
-//void print_commands(const Commands *cmds)
-//{
-//    log_this("Commands:");
-//    for (size_t i = 0; i < cmds->count; i++) {
-//        const Command *cmd = &cmds->items[i];
-//        log_this("%d. %d", i, cmd->type);
-//        if (cmd->args.count > 0) log_this("args:");
-//        for (size_t j = 0; j < cmd->args.count; j++) {
-//            char *arg = cmd->args.items[j];
-//            log_this(" - %d. %s", j, arg);
-//        }
-//    }
-//}
 
 typedef struct
 {
@@ -752,13 +781,21 @@ typedef struct
     Token token;
 } Lexer;
 
-Lexer lexer_create(char *path)
+Lexer lexer_create_from_path(char *path)
 {
     Lexer l = {0};
     l.loc.path = path;
     l.str = read_file(path);
     return l;
 }
+
+Lexer lexer_create_from_string(char *string)
+{
+    Lexer l = {0};
+    l.str = string;
+    return l;
+}
+
 
 void lexer_trim_left(Lexer *l)
 {
@@ -777,7 +814,7 @@ void lexer_skip_comment(Lexer *l)
     }
 }
 
-bool lexer_string(Lexer *l)
+bool lexer_get_string(Lexer *l)
 {
     l->str++;
     l->loc.col++;
@@ -851,7 +888,7 @@ bool lexer_next(Lexer *l)
         l->str = end;
         l->token.type = TOKEN_NUMBER;
     } else if (c == '"') {
-        lexer_string(l);
+        lexer_get_string(l);
     } else {
         l->token.type = c;
         l->str++;
@@ -864,7 +901,7 @@ static_assert(ACTUAL_TOKENS_COUNT == 10, "lexer_get_current_token");
 Token lexer_get_current_token(Lexer *l)
 {
     Token token = l->token;
-    token.loc.path = strdup(l->loc.path);
+    if (l->loc.path) token.loc.path = strdup(l->loc.path);
 
     if (token.type >= 0 && token.type <= 255) return token;
 
@@ -920,141 +957,32 @@ void lexer_free_current_token(Lexer *l)
     free_token(&l->token);
 }
 
-Tokens lex_file(char *path)
+Tokens lex(Lexer *l)
 {
-    log_this("Lexing file `%s`...", path);
-    Lexer lex = lexer_create(path); 
     Tokens tokens = {0};
-    while (lexer_next(&lex)) {
-        Token token = lexer_get_current_token(&lex);
+    while (lexer_next(l)) {
+        Token token = lexer_get_current_token(l);
         da_push(&tokens, token);
-        token_log(token);
-        lexer_free_current_token(&lex);
+        //token_log(token);
+        lexer_free_current_token(l);
     }
     Token eof = { .type = TOKEN_EOF };
     da_push(&tokens, eof);
     return tokens;
 }
 
-#define NO_LOCATION NULL
-char *parse_commands(char *cmds_str, Command *cmd, CommandArgs *args, Location *loc)
+Tokens lex_file(char *path)
 {
-    (void)args; // TODO
-
-    if (loc) loc->col += trim_left(&cmds_str);
-    //log_this("- Parsing cmds from `%s`", cmds_str);
-    size_t i = 0;
-    size_t len = strlen(cmds_str);
-    while (i < len && strlen(cmds_str) > 0) {
-        Command subcmd = {0};
-
-        if (isdigit(*cmds_str)) {
-            char *end_of_n;
-            long n = strtol(cmds_str, &end_of_n, 10);
-            if (n <= 0) {
-                char *error = malloc(sizeof(char)*256);
-                sprintf(error, "command multiplicity must be greater than 0, but got `%ld`", n);
-                return error;
-            } else subcmd.n = n;
-            if (loc) loc->col += end_of_n - cmds_str;
-            i += end_of_n - cmds_str;
-            cmds_str = end_of_n;
-        } else subcmd.n = 1;
-        //log_this("multiplicity: %zu", subcmd.n);
-
-        char *end_of_cmd_name = strpbrk(cmds_str, " \t(");
-        bool has_args = false;
-        if (end_of_cmd_name != NULL) {
-            if (*end_of_cmd_name == '(') has_args = true;
-            *end_of_cmd_name = '\0';
-        }
-        subcmd.type = parse_cmdtype(cmds_str);
-        if (subcmd.type == UNKNOWN) {
-            char *error = malloc(sizeof(char)*256);
-            sprintf(error, "unknown command `%s`", cmds_str);
-            return error;
-        } else {
-            //log_this("name: `%s` => type: %d", cmds_str, subcmd.type);
-        }
-
-        int index = get_command_index(&subcmd);
-        if (index == -1) {
-            print_error_and_exit("FATAL: unreachable command `%d`\n", subcmd.type);
-        }
-        const Command *ref_cmd = &commands.items[index];
-        subcmd.name = ref_cmd->name;
-        subcmd.execute = ref_cmd->execute;
-        if (ref_cmd->baked_args.count > 0)
-            subcmd.baked_args = deep_copy_command_args(&ref_cmd->baked_args);
-        // TODO: Command does not contains arguments anymore, this logic is moved to the execute function
-        //if (has_args && ref_cmd->args.count == 0) {
-        //    char *error = malloc(sizeof(char)*256);
-        //    sprintf(error, "command `%s` does not require arguments", subcmd.name);
-        //    return error;
-        //}
-        size_t name_len = strlen(cmds_str);
-        cmds_str += name_len + 1;
-        if (loc) loc->col += name_len;
-
-        // TODO:
-        // - parse strings
-        // - allow \( and \) in strings
-        // - allow \n in strings
-        // - allow \" in strings
-        if (has_args) {
-            char *end_of_cmd_args = strchr(cmds_str, ')');
-            if (end_of_cmd_args == NULL) return strdup("unclosed arguments parenthesis");
-
-            if (loc) loc->col += trim_left(&cmds_str);
-            size_t argslen = end_of_cmd_args - cmds_str;
-            if (argslen == 0) return strdup("no arguments provided");
-            if (loc) loc->col++;
-
-            //log_this("  > Parsing arguments `%s` (%zu)", cmds_str, argslen);
-            size_t args_count = 0;
-            char *arg = cmds_str;
-            bool in_string = false;
-            (void)in_string;
-            size_t j = 0;
-            while (j < argslen+1) {
-                size_t trim = trim_left(&cmds_str);
-                j += trim;
-                arg += trim;
-                if (loc) loc->col += trim;
-
-                char c = cmds_str[j];
-                if (c == ',' || c == ')') { // TODO: next arg
-                    size_t arglen = arg - cmds_str;
-                    if (arglen == 0) {
-                        char *error = malloc(sizeof(char)*256);
-                        // TODO: report the type maybe
-                        sprintf(error, "Argument %zu not provided", args_count+1);
-                        return error;
-                    }
-                    //log_this("    - TODO: parse argument `%.*s`", arglen, cmds_str);
-                    cmds_str += arglen;
-                    argslen -= arglen;
-                    j = 1;
-                    arg++;
-                    if (loc) loc->col += arglen + 1;
-                    args_count++;
-                } else {
-                    j++;
-                    arg++;
-                    if (loc) loc->col++;
-                }
-            }
-
-            if (loc) loc->col += strlen(cmds_str) + 1;
-            cmds_str = end_of_cmd_args + 1;
-        }
-
-        da_push(&cmd->subcmds, subcmd);
-        if (loc) loc->col += trim_left(&cmds_str);
-    }
-
-    return NULL;
+    Lexer lexer = lexer_create_from_path(path); 
+    return lex(&lexer);
 }
+
+Tokens lex_string(char *string)
+{
+    Lexer lexer = lexer_create_from_string(string); 
+    return lex(&lexer);
+}
+
 /// END Commands
 
 /// BEGIN Config
@@ -1180,7 +1108,6 @@ typedef enum { LN_NO, LN_ABS, LN_REL } ConfigLineNumbers;
 typedef struct
 {
     size_t quit_times;
-    time_t msg_lifetime;
     ConfigLineNumbers line_numbers;
 } Config;
 Config config = {0};
@@ -1230,7 +1157,7 @@ bool can_quit(void)
 {
     if (!editor.dirty || editor.current_quit_times == 0) return true;
 
-    // TODO: set higher priority messages that overwrite the current and then restore them after msg_lifetime secs
+    // TODO: set higher priority messages that overwrite the current
     // - da pensare 
     enqueue_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
     editor.current_quit_times--;
@@ -1356,8 +1283,90 @@ void insert_char_at(Row *row, size_t at, int c)
     }
 }
 
-void execute_command(Command *cmd, CommandArgs *args); // forward declaration
+#define WITH_LOCATION true
+Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with_location)
+{
+    log_this("Parsing commands list");
+    Command cmd = {0};
+    size_t i = *index;
+    Token tok_it = tokens.items[i];
+    while (i < tokens.count && tok_it.type != TOKEN_EOF && tok_it.type != TOKEN_NEWLINE) {
+        size_t n = 1; (void)n; // TODO
+        if (tok_it.type == TOKEN_NUMBER) {
+            if (tok_it.number_value <= 0) {
+                if (log) {
+                    if (with_location) {
+                        s_push_fstr(log, LOC_FMT"\n- ERROR: multiplicity number should be > 0 (got %d)\n\n",
+                                LOC_ARG(tok_it.loc), tok_it.number_value);
+                    } else s_push_fstr(log, "ERROR: multiplicity number should be > 0 (got %d)\n", tok_it.number_value);
+                }
+                while (i < tokens.count && tok_it.type != TOKEN_EOF && tok_it.type != TOKEN_NEWLINE) {
+                    i++;
+                    tok_it = tokens.items[i];
+                }
+                cmd.type = ERROR;
+                break;
+            }
+            n = tok_it.number_value;
+            i++;
+            tok_it = tokens.items[i];
+        }
+        if (!expect_token_to_be_of_type_extra_newline(tok_it, TOKEN_IDENT, log)) {
+            while (i < tokens.count && tok_it.type != TOKEN_EOF && tok_it.type != TOKEN_NEWLINE) {
+                i++;
+                tok_it = tokens.items[i];
+            }
+            cmd.type = ERROR;
+            break;
+        }
 
+        char *subcmd_name = tok_it.string_value;
+        CommandType subcmd_type = get_command_type_from_string(subcmd_name);
+        if (subcmd_type == UNKNOWN) {
+            if (log) {
+                if (with_location) {
+                    s_push_fstr(log, LOC_FMT"\n- ERROR: unknown command `%s`\n\n",
+                            LOC_ARG(tok_it.loc), subcmd_name);
+                } else s_push_fstr(log, "ERROR: unknown command `%s`\n", subcmd_name);
+            }
+            while (tok_it.type != TOKEN_NEWLINE) {
+                i++;
+                tok_it = tokens.items[i];
+            }
+            cmd.type = ERROR;
+            break;
+        }
+
+        Command subcmd = {
+            .type = subcmd_type,
+            .n = n
+        };
+
+        i++;
+        tok_it = tokens.items[i];
+
+        if (tok_it.type == '(') {
+            log_this("TODO: parse arguments list for command `%s`", subcmd_name);
+            i++;
+            tok_it = tokens.items[i];
+            while (tok_it.type != ')') {
+                // TODO
+                i++;
+                tok_it = tokens.items[i];
+            } 
+            i++;
+            tok_it = tokens.items[i];
+        }
+
+        subcmd.name = strdup(subcmd_name);
+        da_push(&cmd.subcmds, subcmd);
+    }
+    *index = i;
+    log_this("Done parsing command list");
+    return cmd;
+}
+
+void execute_command(Command *cmd, CommandArgs *args); // forward declaration
 void insert_char(char c)
 {
     if (editor.in_cmd) {
@@ -1369,21 +1378,38 @@ void insert_char(char c)
             s_clear(&editor.cmd);
             editor.cmd_pos = 0;
 
-            Command cmd_from_line = {
-                .name = "command from line",
-                .type = COMMAND_FROM_LINE,
-                .n = 1 // TODO
-            };
+            log_this("Lexing command line `%s`", cmd_str);
             CommandArgs runtime_args = {0};
-            char *parse_error = parse_commands(cmd_str, &cmd_from_line, &runtime_args, NO_LOCATION);
-            if (parse_error != NULL) {
-                enqueue_message("ERROR: %s", parse_error);
-                free(parse_error);
-            } else {
-                execute_command(&cmd_from_line, &runtime_args);
+            Tokens tokens = lex_string(cmd_str);
+            log_this("Lexed command line:");
+            da_foreach (tokens, Token, tok) {
+                char *tokstrval = token_type_and_value_as_str(*tok);
+                log_this(" - %s", tokstrval);
+                free(tokstrval);
             }
-            //free_commands(&cmds); // TODO
-            //free_command_args(&args); // TODO
+
+            size_t index = 0;
+            String parse_log = {0};
+            Command cmd_from_line = parse_commands_list(tokens, &index, &parse_log, !WITH_LOCATION);
+            bool error = cmd_from_line.type == ERROR;
+            if (error) {
+                s_push_null(&parse_log);
+                enqueue_message("COMMAND: %s", parse_log.items); 
+            }
+            if (parse_log.items) s_free(&parse_log);
+            if (error) return;
+
+            log_this("Ready to execute command from line -> type %u", cmd_from_line.type);
+            for (size_t i = 0; i < cmd_from_line.subcmds.count; i++) {
+                log_this("- %s", cmd_from_line.subcmds.items[i].name);
+            }
+
+            cmd_from_line.name = "command from line";
+            cmd_from_line.type = COMMAND_FROM_LINE;
+            cmd_from_line.n = 1; // TODO: trovare un modo
+            execute_command(&cmd_from_line, &runtime_args);
+            free_command(&cmd_from_line);
+            free_command_args(&runtime_args);
         } else {
             da_insert(&editor.cmd, c, editor.cmd_pos);
             editor.cmd_pos++;
@@ -1470,7 +1496,6 @@ void load_config()
     }
 
     const size_t default_quit_times = 3;
-    const size_t default_msg_lifetime = 3;
     const ConfigLineNumbers default_line_numbers = LN_NO;
 
     const char *valid_values_field_bool[] = {"true", "false", NULL};
@@ -1498,8 +1523,6 @@ void load_config()
 
         fprintf(config_file, "set quit_times = %zu\t// times you need to press CTRL-q before exiting without saving\n",
                 default_quit_times); // TODO: make the description a macro/const
-        fprintf(config_file, "set msg_lifetime = %zu\t// time in seconds of the duration of a message\n",
-                default_msg_lifetime);
         fprintf(config_file, "set line_numbers = %s\t// display line numbers at_all, absolute or relative to the current line\n",
                 valid_values_line_numbers.items[default_line_numbers]);
 
@@ -1510,7 +1533,6 @@ void load_config()
     ConfigFields remaining_fields = {0};
 
     da_push(&remaining_fields, create_field_uint("quit_times", &config.quit_times, default_quit_times));
-    da_push(&remaining_fields, create_field_uint("msg_lifetime", (size_t *)&config.msg_lifetime, default_msg_lifetime));
     da_push(&remaining_fields, create_field_limited_string("line_numbers", (LimitedStringIndex *)&config.line_numbers,
                 default_line_numbers, valid_values_line_numbers));
     
@@ -1533,23 +1555,23 @@ void load_config()
     add_builtin_command(FORCE_QUIT,        BUILTIN_FORCE_QUIT,        builtin_force_quit,        NULL);
 
     CommandArgs baked_args = {0};
-    da_push(&baked_args, make_command_arg_int(0,  0, "x"));
-    da_push(&baked_args, make_command_arg_int(-1, 1, "y"));
+    add_command_arg_int(&baked_args, "x", 0);
+    add_command_arg_int(&baked_args, "y", -1);
     add_builtin_command(MOVE_CURSOR_UP, BUILTIN_MOVE_CURSOR_UP, builtin_move_cursor, &baked_args);
 
     da_clear(&baked_args);
-    da_push(&baked_args, make_command_arg_int(0, 0, "x"));
-    da_push(&baked_args, make_command_arg_int(1, 1, "y"));
+    add_command_arg_int(&baked_args, "x", 0);
+    add_command_arg_int(&baked_args, "y", 1);
     add_builtin_command(MOVE_CURSOR_DOWN, BUILTIN_MOVE_CURSOR_DOWN, builtin_move_cursor, &baked_args);
 
     da_clear(&baked_args);
-    da_push(&baked_args, make_command_arg_int(-1, 0, "x"));
-    da_push(&baked_args, make_command_arg_int(0,  1, "y"));
+    add_command_arg_int(&baked_args, "x", -1);
+    add_command_arg_int(&baked_args, "y", 0);
     add_builtin_command(MOVE_CURSOR_LEFT, BUILTIN_MOVE_CURSOR_LEFT, builtin_move_cursor, &baked_args);
 
     da_clear(&baked_args);
-    da_push(&baked_args, make_command_arg_int(1, 0, "x"));
-    da_push(&baked_args, make_command_arg_int(0, 1, "y"));
+    add_command_arg_int(&baked_args, "x", 1);
+    add_command_arg_int(&baked_args, "y", 0);
     add_builtin_command(MOVE_CURSOR_RIGHT, BUILTIN_MOVE_CURSOR_RIGHT, builtin_move_cursor, &baked_args);
 
     add_builtin_command(MOVE_LINE_UP,      BUILTIN_MOVE_LINE_UP,      builtin_move_line_up,      NULL);
@@ -1754,6 +1776,7 @@ void load_config()
         case TOKEN_DEF: {
             i++;
             Token token_command_name = tokens.items[i];
+            if (!expect_token_to_be_of_type_extra_newline(token_command_name, TOKEN_IDENT, &config_log)) continue;
             char *command_name = token_command_name.string_value;
             bool already_defined = false;
             da_enumerate(commands, Command, i, command) {
@@ -1766,33 +1789,76 @@ void load_config()
                 }
             }
             if (already_defined) continue;
-            if (!expect_token_to_be_of_type_extra_newline(token_command_name, TOKEN_IDENT, &config_log)) continue;
             i++;
             Token token_colon = tokens.items[i];
             if (!expect_token_to_be_of_type_extra_newline(token_colon, ':', &config_log)) continue;
 
-            Command user_defined_cmd = {0};
             i++;
-            Token tok_it = tokens.items[i];
-            while (tok_it.type != TOKEN_NEWLINE) {
-                size_t n = 1; (void)n; // TODO
-                if (tok_it.type == TOKEN_NUMBER) {
-                    if (tok_it.number_value <= 0) {
-                        s_push_fstr(&config_log, LOC_FMT"\n- ERROR: multiplicity number should be > 0 (got %d)\n\n",
-                                LOC_ARG(tok_it.loc), tok_it.number_value);
-                        break;
-                    }
-                    n = tok_it.number_value;
-                    i++;
-                    tok_it = tokens.items[i];
-                }
-                if (!expect_token_to_be_of_type_extra_newline(tok_it, TOKEN_IDENT, &config_log)) break;
+            Command user_defined_cmd = parse_commands_list(tokens, &i, &config_log, WITH_LOCATION);
+            //Command user_defined_cmd = {0};
+            //i++;
+            //Token tok_it = tokens.items[i];
+            //while (tok_it.type != TOKEN_NEWLINE) {
+            //    size_t n = 1; (void)n; // TODO
+            //    if (tok_it.type == TOKEN_NUMBER) {
+            //        if (tok_it.number_value <= 0) {
+            //            s_push_fstr(&config_log, LOC_FMT"\n- ERROR: multiplicity number should be > 0 (got %d)\n\n",
+            //                    LOC_ARG(tok_it.loc), tok_it.number_value);
+            //            while (tok_it.type != TOKEN_NEWLINE) {
+            //                i++;
+            //                tok_it = tokens.items[i];
+            //            }
+            //            break;
+            //        }
+            //        n = tok_it.number_value;
+            //        i++;
+            //        tok_it = tokens.items[i];
+            //    }
+            //    if (!expect_token_to_be_of_type_extra_newline(tok_it, TOKEN_IDENT, &config_log)) {
+            //        while (tok_it.type != TOKEN_NEWLINE) {
+            //            i++;
+            //            tok_it = tokens.items[i];
+            //        }
+            //        break;
+            //    }
 
-                i++;
-                tok_it = tokens.items[i];
-            }
+            //    char *subcmd_name = tok_it.string_value;
+            //    CommandType subcmd_type = get_command_type_from_string(subcmd_name);
+            //    if (subcmd_type == UNKNOWN) {
+            //        s_push_fstr(&config_log, LOC_FMT"\n- ERROR: unknown command `%s`\n\n",
+            //                LOC_ARG(tok_it.loc), subcmd_name);
+            //        while (tok_it.type != TOKEN_NEWLINE) {
+            //            i++;
+            //            tok_it = tokens.items[i];
+            //        }
+            //        break;
+            //    }
+
+            //    Command subcmd = {
+            //        .type = subcmd_type,
+            //        .n = n
+            //    };
+
+            //    i++;
+            //    tok_it = tokens.items[i];
+
+            //    if (tok_it.type == '(') {
+            //        log_this("TODO: parse arguments list for command `%s`", subcmd_name);
+            //        i++;
+            //        tok_it = tokens.items[i];
+            //        while (tok_it.type != ')') {
+            //            i++;
+            //            tok_it = tokens.items[i];
+            //        } 
+            //        i++;
+            //        tok_it = tokens.items[i];
+            //    }
+
+            //    subcmd.name = strdup(subcmd_name);
+            //    da_push(&user_defined_cmd.subcmds, subcmd);
+            //}
             user_defined_cmd.name = strdup(command_name);
-            add_user_command(user_defined_cmd);
+            add_user_defined_command(user_defined_cmd);
         } break;
 
         case TOKEN_NEWLINE: break;
@@ -1809,59 +1875,6 @@ void load_config()
     }
 
     free_tokens(&tokens);
-
-    //char *colon = NULL;
-    //if (*line == '#') {
-    //    line++;
-    //    loc.col++;
-    //    colon = strchr(line, ':');
-    //    if (colon == NULL) {
-    //        s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //        s_push_fstr(&config_log, "ERROR: invalid command, it should be of the form #name: commands...\n");
-    //    } else {
-    //        *colon = '\0';
-    //        char *cmd_name = line;
-    //        bool already_defined = false;
-    //        da_enumerate(commands, Command, i, command) {
-    //            if (streq(cmd_name, command->name)) {
-    //                s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //                s_push_fstr(&config_log, "ERROR: redeclaration of %s command `%s`\n", 
-    //                        i < BUILTIN_CMDS_COUNT ? "builtin" : "user defined", cmd_name); 
-    //                already_defined = true;
-    //                break;
-    //            }
-    //        }
-    //        if (already_defined) {
-    //            loc.col = 0;
-    //            loc.row++;
-    //            continue;
-    //        }
-    //        loc.col += strlen(cmd_name) + 1;
-
-    //        char *cmds = colon+1;
-    //        Command user_defined_cmd = {
-    //            .name = strdup(cmd_name),
-    //        };
-    //        CommandArgs cmd_args = {0};
-    //        char *parse_error = parse_commands(cmds, &user_defined_cmd, &cmd_args, &loc);
-    //        if (parse_error != NULL) {
-    //            s_push_fstr(&config_log, "%s:%zu:%zu: ", full_config_path, loc.row+1, loc.col+1);
-    //            s_push_fstr(&config_log, "ERROR: %s\n", parse_error);
-    //            free(parse_error);
-    //        } else {
-    //            // TODO: che ci faccio con cmd_args?
-    //            add_user_command(user_defined_cmd);
-    //            s_push_fstr(&config_log, "added command `%s`\n", cmd_name);
-    //        }
-    //    }
-    //} else if ((colon = strchr(line, ':')) != NULL) {
-    //    *colon = '\0';
-    //    char *field_name = line;
-    //    char *field_value = colon+1;
-    //    while(isspace(*field_value)) {
-    //        loc.col++;
-    //        field_value++;
-    //    }
 
     if (remaining_fields.count > 0) {
         s_push_cstr(&config_log, "\nWARNING: the following fields have not been set:\n");
@@ -2142,8 +2155,9 @@ void update_window_message(void)
 {
     if (editor.in_cmd || !are_there_pending_messages()) return;
 
-    if (time(NULL)-editor.current_msg_time > config.msg_lifetime)
-        next_message();
+    // TODO
+    //if (time(NULL)-editor.current_msg_time > config.msg_lifetime)
+    //    next_message();
 
     if (!are_there_pending_messages()) return;
 
@@ -2527,8 +2541,11 @@ void itoa(int n, char *buf)
 void execute_command(Command *cmd, CommandArgs *runtime_args)
 {
     log_this("Executing command `%s`", cmd->name);
+    da_foreach (cmd->subcmds, Command, subcmd) {
+        log_this(" - %s", subcmd->name);
+    }
 
-    if (cmd->type >= 0 && cmd->type < BUILTIN_CMDS_COUNT) {
+    if (is_command_type_builtin(cmd->type)) {
         CommandArgs final_args = {0}; // TODO: maybe it can be just an array
         for (size_t i = 0; i < cmd->baked_args.count; i++) {
             log_this("baked argument %zu", i);
@@ -2538,18 +2555,18 @@ void execute_command(Command *cmd, CommandArgs *runtime_args)
                     da_push(&final_args, runtime_args->items[arg.placeholder_index]);
                 } else {
                     enqueue_message("ERROR: Missing argument $%zu for %s", arg.index, cmd->name);
+                    log_this("ERROR: Missing argument $%zu for %s", arg.index, cmd->name);
                     return; 
                 }
             } else da_push(&final_args, arg);
         }
         if (cmd->baked_args.count == 0 && runtime_args)
             da_push_many(&final_args, cmd->baked_args.items, cmd->baked_args.count);
-        log_this("execute %p", cmd->execute);
         assert(cmd->execute);
         for (size_t i = 0; i < cmd->n; i++)
             cmd->execute(cmd, &final_args);
         if (final_args.count > 0) free(final_args.items);
-    } else if (cmd->type == COMMAND_FROM_LINE || cmd->type >= USER_DEFINED) {
+    } else if (cmd->type == COMMAND_FROM_LINE || is_command_type_user_defined(cmd->type)) {
         da_foreach(cmd->subcmds, Command, subcmd)
             execute_command(subcmd, runtime_args);
     } else if (cmd->type == UNKNOWN) {
@@ -2699,8 +2716,12 @@ void process_pressed_key(void)
         //case CTRL_H: enqueue_message("TODO: CTRL-H"); break;
         //case CTRL_L: enqueue_message("TODO: CTRL-L"); break;
 
+        //case PAGE_UP:
         //case ALT_k: N_TIMES move_page_up();                      break; 
+
+        //case PAGE_DOWN:
         //case ALT_j: N_TIMES move_page_down();                    break;
+
         //case ALT_h: enqueue_message("TODO: ALT-h"); break;
         //case ALT_l: enqueue_message("TODO: ALT-l"); break;
         //            
@@ -2740,20 +2761,6 @@ void process_pressed_key(void)
         case KEY_BACKSPACE:
             N_TIMES delete_char();
             break;
-
-        //case PAGE_UP:
-        //case PAGE_DOWN:
-        //    if (c == PAGE_UP && E.cy != 0)
-        //        E.cy = 0;
-        //    else if (c == PAGE_DOWN && E.cy != E.screen_rows-1)
-        //        E.cy = E.screen_rows-1;
-        //    {
-        //    int times = E.screen_rows;
-        //    while(times--)
-        //        editorMoveCursor(c == PAGE_UP ? ARROW_UP:
-        //                                        ARROW_DOWN);
-        //    }
-        //    break;
 
         case ESC:
             if (editor.in_cmd) {
