@@ -47,6 +47,14 @@ typedef struct
 
 typedef struct
 {
+    char **items;
+    size_t count;
+    size_t capacity;
+    size_t index;
+} CyclableStrings;
+
+typedef struct
+{
     char *filename;
     Rows rows;
     int dirty;
@@ -58,12 +66,13 @@ typedef struct
     size_t screen_cols;
     size_t page;
 
-    Strings messages;
-    time_t current_msg_time;
+    CyclableStrings messages;
+    bool is_showing_message;
 
     String cmd;
     size_t cmd_pos;
     bool in_cmd;
+    CyclableStrings cmds_history;
 
     size_t current_quit_times;
 
@@ -97,9 +106,11 @@ static Editor editor = {0};
 /* Colors */
 typedef enum
 {
-    ED_COLOR_DEFAULT_BACKGROUND = 100,
+    ED_COLOR_DEFAULT_BACKGROUND = 10,
     ED_COLOR_DEFAULT_FOREGROUND,
-    ED_COLOR_YELLOW
+    ED_COLOR_YELLOW,
+    ED_COLOR_RED,
+    ED_COLOR_BLUE
 } Ed_Color;
 
 typedef enum
@@ -138,7 +149,10 @@ typedef enum
     ALT_J,
     ALT_H,
     ALT_L,
-    ALT_M,
+
+    ALT_m,
+    ALT_n,
+    ALT_p,
 
     // TODO
     //CTRL_ALT_k,
@@ -202,27 +216,17 @@ void log_this(char *format, ...)
     fclose(logfile);
 }
 
-void enqueue_message(const char *fmt, ...)
+void write_message(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
     char buf[1024] = {0};
-    vsnprintf(buf, win_message.width, fmt, ap);  // TODO: si puo' anche togliere la limitazione di 1024,
-                                                 // tanto ora posso creare una finestra grande a piacere
-                                                 // (ovviamente non oltre le dimensioni del terminale, per ora)
+    vsnprintf(buf, win_message.width, fmt, ap);  // TODO: aumentare la dimensione della finestra
+                                                 //       se il messaggio e' lungo o su piu' righe
     da_push(&editor.messages, strdup(buf)); // NOTE: rember to free
     va_end(ap);
-}
 
-static inline bool are_there_pending_messages(void) { return !da_is_empty(&editor.messages); }
-
-void next_message(void)
-{
-    if (!are_there_pending_messages()) return;
-    char *msg = editor.messages.items[0];
-    da_remove_first(&editor.messages);
-    free(msg);
-    editor.current_msg_time = time(NULL);
+    editor.is_showing_message = true;
 }
 
 /// BEGIN Commands
@@ -376,60 +380,46 @@ bool is_command_type_user_defined(CommandType type)
     return type >= USER_DEFINED && type < USER_DEFINED + USER_CMDS_COUNT;
 }
 
-typedef struct
-{
-    int index;
-    char **items;
-    size_t count;
-    size_t capacity;
-} CommandsHistory;
-static CommandsHistory commands_history = {0};
+bool cs_is_empty(CyclableStrings cs) { return cs.count == 0; }
 
-// index == 1
-// [ciao, caro]
-// 1. :ciao\n
-// 2. :caro\n
-// 3. :C-P
-
-void commands_history_add(char *cmd)
+char *cs_get_current(CyclableStrings cs)
 {
-    //log_this("Adding command in history: `%s`", cmd);
-    da_push(&commands_history, strdup(cmd));
-    commands_history.index = -1;
+    return cs_is_empty(cs) ? NULL : cs.items[cs.index];
 }
 
-void commands_history_previous()
+void cs_push(CyclableStrings *cs, char *s) { da_push(cs, strdup(s)); }
+
+char *cs_previous(CyclableStrings *cs)
 {
-    if (!editor.in_cmd) return;
-    if (da_is_empty(&commands_history)) return;
-    if (commands_history.index == 0) return;
-    if (commands_history.index == -1) commands_history.index = commands_history.count-1;
-    else commands_history.index--;
-    char *cmd = commands_history.items[commands_history.index];
-    size_t len = strlen(cmd);
-    s_clear(&editor.cmd);
-    s_push_str(&editor.cmd, cmd, len);
-    editor.cmd_pos = len;
+    if (da_is_empty(cs)) return NULL;
+    if (cs->index > 0) cs->index--; 
+    else cs->index = cs->count-1;
+    return cs->items[cs->index];
+
+    //size_t len = strlen(cmd);
+    //s_clear(&editor.cmd);
+    //s_push_str(&editor.cmd, cmd, len);
+    //editor.cmd_pos = len;
 }
 
-void commands_history_next()
+char *cs_next(CyclableStrings *cs)
 {
-    if (!editor.in_cmd) return;
-    if (da_is_empty(&commands_history)) return;
-    if (commands_history.index >= (int)commands_history.count-1) return;
-    commands_history.index++;
-    char *cmd = commands_history.items[commands_history.index];
-    size_t len = strlen(cmd);
-    s_clear(&editor.cmd);
-    s_push_str(&editor.cmd, cmd, len);
-    editor.cmd_pos = len;
+    if (da_is_empty(cs)) return NULL;
+    if (cs->index < cs->count-1) cs->index++;
+    else cs->index = 0;
+    return cs->items[cs->index];
+
+    //size_t len = strlen(cmd);
+    //s_clear(&editor.cmd);
+    //s_push_str(&editor.cmd, cmd, len);
+    //editor.cmd_pos = len;
 }
 
 bool expect_n_arguments(Command *cmd, CommandArgs *args, size_t n)
 {
     if (args->count == n) return true;
 
-    enqueue_message("ERROR: command `%s` expects %zu argument%s, but got %zu",
+    write_message("ERROR: command `%s` expects %zu argument%s, but got %zu",
             cmd->name, n, n == 1 ? "" : "s", args->count);
     return false;
 }
@@ -1134,13 +1124,13 @@ void save(void)
     close(fd);
     s_free(&save_buf);
     editor.dirty = 0;
-    enqueue_message("%zu bytes written on disk", len);
+    write_message("%zu bytes written on disk", len);
     return;
 
 writeerr:
     s_free(&save_buf);
     if (fd != -1) close(fd);
-    enqueue_message("Can't save! I/O error: %s", strerror(errno));
+    write_message("Can't save! I/O error: %s", strerror(errno));
 }
 
 // TODO: argomento per salvare il file con un nome
@@ -1159,7 +1149,7 @@ bool can_quit(void)
 
     // TODO: set higher priority messages that overwrite the current
     // - da pensare 
-    enqueue_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
+    write_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
     editor.current_quit_times--;
     return false;
 }
@@ -1235,7 +1225,7 @@ void builtin_move_cursor(Command *cmd, CommandArgs *args)
     (void)cmd;
 
     if (args->count != 2) {
-        enqueue_message("COMMAND ERROR: command %s takes 2 arguments, but got %zu", args->count);
+        write_message("COMMAND ERROR: command %s takes 2 arguments, but got %zu", args->count);
         return;
     }
 
@@ -1290,8 +1280,11 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
     Command cmd = {0};
     size_t i = *index;
     Token tok_it = tokens.items[i];
-    while (i < tokens.count && tok_it.type != TOKEN_EOF && tok_it.type != TOKEN_NEWLINE) {
-        size_t n = 1; (void)n; // TODO
+
+    bool can_continue(void) { return i < tokens.count && tok_it.type != TOKEN_EOF && tok_it.type != TOKEN_NEWLINE; }
+
+    while (can_continue()) {
+        size_t n = 1;
         if (tok_it.type == TOKEN_NUMBER) {
             if (tok_it.number_value <= 0) {
                 if (log) {
@@ -1300,7 +1293,7 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
                                 LOC_ARG(tok_it.loc), tok_it.number_value);
                     } else s_push_fstr(log, "ERROR: multiplicity number should be > 0 (got %d)\n", tok_it.number_value);
                 }
-                while (i < tokens.count && tok_it.type != TOKEN_EOF && tok_it.type != TOKEN_NEWLINE) {
+                while (can_continue()) {
                     i++;
                     tok_it = tokens.items[i];
                 }
@@ -1312,7 +1305,7 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
             tok_it = tokens.items[i];
         }
         if (!expect_token_to_be_of_type_extra_newline(tok_it, TOKEN_IDENT, log)) {
-            while (i < tokens.count && tok_it.type != TOKEN_EOF && tok_it.type != TOKEN_NEWLINE) {
+            while (can_continue()) {
                 i++;
                 tok_it = tokens.items[i];
             }
@@ -1321,7 +1314,9 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
         }
 
         char *subcmd_name = tok_it.string_value;
+        log_this("subcommand name: %s", subcmd_name);
         CommandType subcmd_type = get_command_type_from_string(subcmd_name);
+        log_this("subcommand type: %s", get_command_type_as_cstr(subcmd_type));
         if (subcmd_type == UNKNOWN) {
             if (log) {
                 if (with_location) {
@@ -1329,7 +1324,7 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
                             LOC_ARG(tok_it.loc), subcmd_name);
                 } else s_push_fstr(log, "ERROR: unknown command `%s`\n", subcmd_name);
             }
-            while (tok_it.type != TOKEN_NEWLINE) {
+            while (can_continue()) {
                 i++;
                 tok_it = tokens.items[i];
             }
@@ -1349,11 +1344,14 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
             log_this("TODO: parse arguments list for command `%s`", subcmd_name);
             i++;
             tok_it = tokens.items[i];
-            while (tok_it.type != ')') {
+            while (can_continue() && tok_it.type != ')') {
                 // TODO
                 i++;
                 tok_it = tokens.items[i];
             } 
+            if (tok_it.type != ')') {
+                // TODO: error
+            }
             i++;
             tok_it = tokens.items[i];
         }
@@ -1373,7 +1371,7 @@ void insert_char(char c)
         if (c == '\n') {
             s_push_null(&editor.cmd);
             char *cmd_str = editor.cmd.items;
-            commands_history_add(cmd_str);
+            cs_push(&editor.cmds_history, cmd_str);
             editor.in_cmd = false;
             s_clear(&editor.cmd);
             editor.cmd_pos = 0;
@@ -1394,7 +1392,7 @@ void insert_char(char c)
             bool error = cmd_from_line.type == ERROR;
             if (error) {
                 s_push_null(&parse_log);
-                enqueue_message("COMMAND: %s", parse_log.items); 
+                write_message("Command: %s", parse_log.items); 
             }
             if (parse_log.items) s_free(&parse_log);
             if (error) return;
@@ -1484,7 +1482,7 @@ void builtin_goto_line(Command *cmd, CommandArgs *args)
 {
     if (!expect_n_arguments(cmd, args, 1)) return;
     size_t line = args->items[0].uint_value;
-    enqueue_message("TODO: goto line %zu", line);
+    write_message("TODO: goto line %zu", line);
 }
 
 int read_key(); // Forward declaration
@@ -1942,6 +1940,7 @@ load_config_fail:
     default: waitpid(child, NULL, 0);
     }
 
+    // TODO: colors here
     clear();
     printw("- Press ENTER to continue ignoring errors and warnings\n");
     printw("- Press ESC to exit\n");
@@ -1958,16 +1957,17 @@ load_config_fail:
 /* Pairs */
 typedef enum
 {
-    DEFAULT_EDITOR_PAIR = 0,
+    DEFAULT_EDITOR_PAIR = 1,
     DEFAULT_EDITOR_PAIR_INV,
     DEFAULT_STATUS_PAIR,
-    DEFAULT_MESSAGE_PAIR
+    DEFAULT_MESSAGE_PAIR,
+    DEFAULT_COMMAND_PAIR
 } EditorPair;
 
 /* Windows */
 static inline void get_screen_size(void) { getmaxyx(stdscr, editor.screen_rows, editor.screen_cols); }
 
-Window create_window(int h, int w, int y, int x, int pair)
+Window create_window(int h, int w, int y, int x, int color_pair)
 {
     Window win = {0};
     win.win = newwin(h, w, y, x);
@@ -1975,7 +1975,7 @@ Window create_window(int h, int w, int y, int x, int pair)
     win.width = w;
     win.start_y = y;
     win.start_x = x;
-    wattron(win.win, COLOR_PAIR(pair));
+    if (has_colors() && can_change_color()) wbkgd(win.win, COLOR_PAIR(color_pair));
     return win;
 }
 
@@ -1984,9 +1984,9 @@ void create_windows(void)
     win_main = create_window(editor.screen_rows-1, editor.screen_cols-LINE_NUMBERS_SPACE, 0, LINE_NUMBERS_SPACE,
             DEFAULT_EDITOR_PAIR);
     win_line_numbers = create_window(editor.screen_rows-1, LINE_NUMBERS_SPACE, 0, 0, DEFAULT_EDITOR_PAIR);
-    win_message      = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_EDITOR_PAIR_INV);
-    win_command      = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_EDITOR_PAIR_INV);
-    win_status       = create_window(1, editor.screen_cols, editor.screen_rows-1, 0, DEFAULT_EDITOR_PAIR);
+    win_message      = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_MESSAGE_PAIR);
+    win_command      = create_window(1, editor.screen_cols, editor.screen_rows-2, 0, DEFAULT_COMMAND_PAIR);
+    win_status       = create_window(1, editor.screen_cols, editor.screen_rows-1, 0, DEFAULT_STATUS_PAIR);
 }
 
 void destroy_windows(void)
@@ -2000,10 +2000,16 @@ void destroy_windows(void)
 
 void ncurses_end(void)
 {
+    // TODO:
+    // - restore original colors
+    // - restore original terminal options
     curs_set(1);
     endwin();
     log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
 }
+
+#define COLOR_VALUE_TO_NCURSES(value) ((value*1000)/255)
+#define RGB_TO_NCURSES(r, g, b) COLOR_VALUE_TO_NCURSES(r), COLOR_VALUE_TO_NCURSES(g), COLOR_VALUE_TO_NCURSES(b)
 
 void ncurses_init(void)
 {
@@ -2016,23 +2022,29 @@ void ncurses_init(void)
     set_escdelay(25);
     keypad(stdscr, TRUE);
 
-    // TODO: fix damn colors
-    if (has_colors()) {
-        //start_color();
-
-        init_color(ED_COLOR_DEFAULT_BACKGROUND, 18, 18, 18);
-        init_color(ED_COLOR_DEFAULT_FOREGROUND, 5, 20, 5);
-        init_color(ED_COLOR_YELLOW, 178, 181, 0);
-
-        init_pair(DEFAULT_EDITOR_PAIR, ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_DEFAULT_BACKGROUND);
-        init_pair(DEFAULT_EDITOR_PAIR_INV, ED_COLOR_DEFAULT_BACKGROUND, ED_COLOR_DEFAULT_FOREGROUND);
-        init_pair(DEFAULT_MESSAGE_PAIR, COLOR_WHITE, COLOR_RED);
-        //init_pair(DEFAULT_STATUS_PAIR, ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_DEFAULT_BACKGROUND);
-
-        //use_default_colors();
-    }
-
     atexit(ncurses_end);
+}
+
+void initialize_colors(void)
+{
+    if (has_colors()) {
+        start_color();
+        if (can_change_color()) {
+            init_color(ED_COLOR_DEFAULT_BACKGROUND, RGB_TO_NCURSES(18, 18, 18));
+            init_color(ED_COLOR_DEFAULT_FOREGROUND, RGB_TO_NCURSES(150, 200, 150));
+            init_color(ED_COLOR_YELLOW, RGB_TO_NCURSES(178, 181, 0));
+            init_color(ED_COLOR_RED, RGB_TO_NCURSES(150, 20, 20));
+            init_color(ED_COLOR_BLUE, RGB_TO_NCURSES(20, 20, 150));
+
+            init_pair(DEFAULT_EDITOR_PAIR,     ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_DEFAULT_BACKGROUND);
+            init_pair(DEFAULT_EDITOR_PAIR_INV, ED_COLOR_DEFAULT_BACKGROUND, ED_COLOR_DEFAULT_FOREGROUND);
+            init_pair(DEFAULT_MESSAGE_PAIR,    ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_RED);
+            init_pair(DEFAULT_COMMAND_PAIR,    ED_COLOR_DEFAULT_FOREGROUND, ED_COLOR_BLUE);
+            init_pair(DEFAULT_STATUS_PAIR,     ED_COLOR_DEFAULT_BACKGROUND, ED_COLOR_DEFAULT_FOREGROUND);
+        } else {
+            use_default_colors();
+        }
+    }
 }
 
 int read_key()
@@ -2064,7 +2076,9 @@ int read_key()
                 case 'H'          : return ALT_H;
                 case 'l'          : return ALT_l;
                 case 'L'          : return ALT_L;
-                case 'M'          : return ALT_M;
+                case 'm'          : return ALT_m;
+                case 'n'          : return ALT_n;
+                case 'p'          : return ALT_p;
                 case KEY_BACKSPACE: return ALT_BACKSPACE;
                 case ':'          : return ALT_COLON;
                 default           : return ESC;
@@ -2156,23 +2170,14 @@ void update_window_line_numbers(void)
     }
 }
 
-// TODO: non funziona
 void update_window_message(void)
 {
-    if (editor.in_cmd || !are_there_pending_messages()) return;
-
-    // TODO
-    //if (time(NULL)-editor.current_msg_time > config.msg_lifetime)
-    //    next_message();
-
-    if (!are_there_pending_messages()) return;
-
-    wprintw(win_message.win, editor.messages.items[0]);
+    waddstr(win_message.win, cs_get_current(editor.messages));
 }
 
 void update_window_command(void)
 {
-    wprintw(win_command.win, "Command: ");
+    waddstr(win_command.win, "Command: ");
     wprintw(win_command.win, S_FMT, S_ARG(editor.cmd));
 }
 
@@ -2213,7 +2218,7 @@ void update_windows(void)
     update_window(main);
     update_window(line_numbers);
     if (editor.in_cmd) update_window(command);
-    else if (are_there_pending_messages()) update_window(message);
+    else if (editor.is_showing_message) update_window(message);
     update_window(status);
 
     //Row *row;
@@ -2414,7 +2419,6 @@ void editor_init()
     get_screen_size();
     editor.current_quit_times = config.quit_times;
     editor.N = N_DEFAULT;
-    commands_history.index = -1;
 
     signal(SIGWINCH, handle_sigwinch);
 }
@@ -2560,7 +2564,7 @@ void execute_command(Command *cmd, CommandArgs *runtime_args)
                 if (runtime_args && arg.placeholder_index < runtime_args->count) {
                     da_push(&final_args, runtime_args->items[arg.placeholder_index]);
                 } else {
-                    enqueue_message("ERROR: Missing argument $%zu for %s", arg.index, cmd->name);
+                    write_message("ERROR: Missing argument $%zu for %s", arg.index, cmd->name);
                     log_this("ERROR: Missing argument $%zu for %s", arg.index, cmd->name);
                     return; 
                 }
@@ -2576,7 +2580,7 @@ void execute_command(Command *cmd, CommandArgs *runtime_args)
         da_foreach(cmd->subcmds, Command, subcmd)
             execute_command(subcmd, runtime_args);
     } else if (cmd->type == UNKNOWN) {
-        enqueue_message("Unknown command `%s`", cmd->name);
+        write_message("Unknown command `%s`", cmd->name);
     } else {
         print_error_and_exit("Unreachable command `%s` (%u) in execute_command\n",
                 cmd->name ? cmd->name : "", cmd->type);
@@ -2585,7 +2589,7 @@ void execute_command(Command *cmd, CommandArgs *runtime_args)
 
 void insert_newline_and_keep_pos()
 {
-    enqueue_message("TODO: insert_newline_and_keep_pos");
+    write_message("TODO: insert_newline_and_keep_pos");
 }
 
 void delete_char_at(Row *row, size_t at)
@@ -2712,15 +2716,24 @@ void process_pressed_key(void)
         case ALT_H: move_cursor_first_non_space(); break;
         case ALT_L: move_cursor_last_non_space();  break;
 
-        case ALT_M: next_message(); break;
+        case ALT_m:
+            editor.is_showing_message = !editor.is_showing_message;
+            break;
 
-        case CTRL_P: commands_history_previous(); break;
-        case CTRL_N: commands_history_next();     break;
+        case ALT_p:
+            if (editor.in_cmd) cs_previous(&editor.cmds_history);
+            else cs_previous(&editor.messages);
+            break;
+
+        case ALT_n:
+            if (editor.in_cmd) cs_next(&editor.cmds_history);
+            else cs_next(&editor.messages);
+            break;
 
         //case CTRL_K: N_TIMES scroll_up();                          break;
         //case CTRL_J: N_TIMES scroll_down();                        break;
-        //case CTRL_H: enqueue_message("TODO: CTRL-H"); break;
-        //case CTRL_L: enqueue_message("TODO: CTRL-L"); break;
+        //case CTRL_H: write_message("TODO: CTRL-H"); break;
+        //case CTRL_L: write_message("TODO: CTRL-L"); break;
 
         //case PAGE_UP:
         //case ALT_k: N_TIMES move_page_up();                      break; 
@@ -2728,8 +2741,8 @@ void process_pressed_key(void)
         //case PAGE_DOWN:
         //case ALT_j: N_TIMES move_page_down();                    break;
 
-        //case ALT_h: enqueue_message("TODO: ALT-h"); break;
-        //case ALT_l: enqueue_message("TODO: ALT-l"); break;
+        //case ALT_h: write_message("TODO: ALT-h"); break;
+        //case ALT_l: write_message("TODO: ALT-l"); break;
         //            
         //case ALT_K: move_cursor_begin_of_file(); break;
         //case ALT_J: move_cursor_end_of_file();   break;
@@ -2743,7 +2756,7 @@ void process_pressed_key(void)
             if (editor.in_cmd) {
                 // TODO: autocomplete command
             } else {
-                enqueue_message("TODO: insert TAB");
+                write_message("TODO: insert TAB");
                 //insert_char('\t');
                 N_TIMES {
                     // TODO: tab to spaces + numero di spazi (config)
@@ -2799,6 +2812,7 @@ int main(int argc, char **argv)
     ncurses_init();
     load_config();
     editor_init();
+    initialize_colors();
     create_windows();
 
     if (!open_file(filename)) {
