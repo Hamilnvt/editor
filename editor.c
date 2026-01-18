@@ -2138,8 +2138,14 @@ void update_window_main(void)
             wprintw(win_main.win, "~\n");
             continue;
         }
-        Row *row = ROW(i);
-        wprintw(win_main.win, S_FMT"\n", S_ARG(row->content));
+        wprintw(win_main.win, S_FMT"\n", S_ARG(ROW(i)->content));
+    }
+    if (editor.in_cmd) {
+        wmove(win_main.win, editor.cy, editor.cx);
+        wattron(win_main.win, A_REVERSE);
+        char char_at_cursor = mvwinch(win_main.win, editor.cy, editor.cx) & A_CHARTEXT;
+        waddch(win_main.win, char_at_cursor);
+        wattroff(win_main.win, A_REVERSE);
     }
 }
 
