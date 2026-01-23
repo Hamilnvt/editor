@@ -55,6 +55,20 @@ typedef struct
 
 typedef struct
 {
+    char *handle; // reversed
+    size_t handle_len;
+    char *expansion;
+} Snippet;
+
+typedef struct
+{
+    Snippet *items;
+    size_t count;
+    size_t capacity;
+} Snippets;
+
+typedef struct
+{
     char *filename;
     Rows rows;
     int dirty;
@@ -72,7 +86,9 @@ typedef struct
     String cmd;
     size_t cmd_pos;
     bool in_cmd;
-    CyclableStrings cmds_history;
+    CyclableStrings commands_history;
+
+    Snippets snippets;
 
     size_t current_quit_times;
 
@@ -154,16 +170,10 @@ typedef enum
     ALT_n,
     ALT_p,
 
-    // TODO
-    //CTRL_ALT_k,
-    //CTRL_ALT_j,
-    //CTRL_ALT_h,
-    //CTRL_ALT_l,
-
-    //CTRL_ALT_K,
-    //CTRL_ALT_J,
-    //CTRL_ALT_H,
-    //CTRL_ALT_L,
+    CTRL_ALT_K,
+    CTRL_ALT_J,
+    CTRL_ALT_H,
+    CTRL_ALT_L,
 
     ALT_BACKSPACE,
     ALT_COLON,
@@ -223,10 +233,13 @@ void write_message(const char *fmt, ...)
     char buf[1024] = {0};
     vsnprintf(buf, win_message.width, fmt, ap);  // TODO: aumentare la dimensione della finestra
                                                  //       se il messaggio e' lungo o su piu' righe
-    da_push(&editor.messages, strdup(buf)); // NOTE: rember to free
     va_end(ap);
 
-    editor.is_showing_message = true;
+    // maybe I can do some sort of temporary messages
+    // maybe I can display in the status that there is a new message so that they're not invasive (config?)
+    editor.messages.index = editor.messages.count;
+    da_push(&editor.messages, strdup(buf)); // NOTE: rember to free
+    if (!editor.in_cmd) editor.is_showing_message = true;
 }
 
 /// BEGIN Commands
@@ -393,7 +406,7 @@ char *cs_previous(CyclableStrings *cs)
 {
     if (da_is_empty(cs)) return NULL;
     if (cs->index > 0) cs->index--; 
-    else cs->index = cs->count-1;
+    //else cs->index = cs->count-1; // TODO: make it a config?
     return cs->items[cs->index];
 
     //size_t len = strlen(cmd);
@@ -406,7 +419,7 @@ char *cs_next(CyclableStrings *cs)
 {
     if (da_is_empty(cs)) return NULL;
     if (cs->index < cs->count-1) cs->index++;
-    else cs->index = 0;
+    //else cs->index = 0; // TODO: make it a config?
     return cs->items[cs->index];
 
     //size_t len = strlen(cmd);
@@ -1110,7 +1123,7 @@ void save(void)
         s_push(&save_buf, '\n');
     }
 
-    // TODO: make the user decide, in the status line, the name of the file if not set
+    // TODO: make the user decide the name of the file if not set
     // - probabilmente devo fare un sistema che permetta di cambiare l'inizio della command line (ora e' sempre Command:) e poi fare cose diverse una volta che si e' premuto ENTER
     int fd = open(editor.filename, O_RDWR|O_CREAT, 0644);
     if (fd == -1) goto writeerr;
@@ -1141,14 +1154,29 @@ void builtin_save(Command *cmd, CommandArgs *args)
     save();
 }
 
-_Noreturn void quit() { exit(0); }
+void ncurses_end(void)
+{
+    // TODO:
+    // - restore original colors
+    // - restore original terminal options (maybe not needed)
+    curs_set(1);
+    clear();
+    refresh();
+    endwin();
+    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+}
+
+_Noreturn void quit()
+{
+    ncurses_end();
+    exit(0);
+}
 
 bool can_quit(void)
 {
     if (!editor.dirty || editor.current_quit_times == 0) return true;
 
-    // TODO: set higher priority messages that overwrite the current
-    // - da pensare 
+    // TODO: set higher priority messages that overwrite the current (da pensare)
     write_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
     editor.current_quit_times--;
     return false;
@@ -1181,7 +1209,7 @@ void move_cursor_up(void)
         editor.offset--;
         // TODO: deve cambiare anche la pagina, ma come?
     }
-    if (editor.cy - N_OR_DEFAULT(1) > 0) editor.cy -= N_OR_DEFAULT(1);
+    if (editor.cy - 1 > 0) editor.cy--;
     else editor.cy = 0;
 }
 
@@ -1192,7 +1220,7 @@ void move_cursor_down(void)
         editor.offset++;
         // TODO: deve cambiare anche la pagina, ma come?
     }
-    if (editor.cy+N_OR_DEFAULT(1) < win_main.height-1) editor.cy += N_OR_DEFAULT(1);
+    if (editor.cy + 1 < win_main.height-1) editor.cy++;
     else editor.cy = win_main.height-1;
     //if (editor.offset < editor.rows.count-N_OR_DEFAULT(0)-1) editor.offset += N_OR_DEFAULT(1); 
     //else editor.offset = editor.rows.count-1;
@@ -1201,10 +1229,10 @@ void move_cursor_down(void)
 void move_cursor_left(void)
 {
     if (editor.in_cmd) {
-        if (editor.cmd_pos > 0) editor.cmd_pos -= 1;
+        if (editor.cmd_pos > 0) editor.cmd_pos--;
         else editor.cmd_pos = 0;
     } else {
-        if (editor.cx > 0) editor.cx -= 1;
+        if (editor.cx > 0) editor.cx--;
         else editor.cx = 0;
     }
 }
@@ -1212,10 +1240,10 @@ void move_cursor_left(void)
 void move_cursor_right(void)
 {
     if (editor.in_cmd) {
-        if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos += 1;
+        if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos++;
         else editor.cmd_pos = editor.cmd.count;
     } else {
-        if (editor.cx < win_main.width-1) editor.cx += 1;
+        if (editor.cx < win_main.width-1) editor.cx++;
         else editor.cx = win_main.width-1;
     }
 }
@@ -1246,7 +1274,7 @@ void builtin_move_line_up()
     Row tmp = editor.rows.items[y];
     editor.rows.items[y] = editor.rows.items[y-1];
     editor.rows.items[y-1] = tmp;
-    editor.cy--;
+    move_cursor_up();
     editor.dirty++;
 }
 
@@ -1257,7 +1285,7 @@ void builtin_move_line_down()
     Row tmp = editor.rows.items[y];
     editor.rows.items[y] = editor.rows.items[y+1];
     editor.rows.items[y+1] = tmp;
-    editor.cy++;
+    move_cursor_down();
     editor.dirty++;
 }
 
@@ -1371,7 +1399,7 @@ void insert_char(char c)
         if (c == '\n') {
             s_push_null(&editor.cmd);
             char *cmd_str = editor.cmd.items;
-            cs_push(&editor.cmds_history, cmd_str);
+            cs_push(&editor.commands_history, cmd_str);
             editor.in_cmd = false;
             s_clear(&editor.cmd);
             editor.cmd_pos = 0;
@@ -1409,7 +1437,7 @@ void insert_char(char c)
             free_command(&cmd_from_line);
             free_command_args(&runtime_args);
         } else {
-            da_insert(&editor.cmd, c, editor.cmd_pos);
+            da_push(&editor.cmd, c);
             editor.cmd_pos++;
         }
         return;
@@ -1470,8 +1498,10 @@ void builtin_date(Command *cmd, CommandArgs *args)
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     char date[64];
-    // TODO: error message if it fails, not an assert
-    assert(strftime(date, sizeof(date), "%c", tm));
+    if (strftime(date, sizeof(date), "%c", tm) == 0) {
+        write_message("Could not get date");
+        return;
+    }
     log_this("%s", date);
     for (size_t i = 0; i < strlen(date); i++) {
         insert_char(date[i]);
@@ -1998,14 +2028,11 @@ void destroy_windows(void)
     delwin(win_status.win);
 }
 
-void ncurses_end(void)
+void cleanup_on_terminating_signal(int sig)
 {
-    // TODO:
-    // - restore original colors
-    // - restore original terminal options
-    curs_set(1);
-    endwin();
-    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+    log_this("Program received signal %d", sig);
+    ncurses_end();
+    exit(1);
 }
 
 #define COLOR_VALUE_TO_NCURSES(value) ((value*1000)/255)
@@ -2015,14 +2042,16 @@ void ncurses_init(void)
 {
     initscr();
 
-    raw(); //cbreak();
+    raw();
     noecho();
     nonl();
     nodelay(stdscr, TRUE);
     set_escdelay(25);
     keypad(stdscr, TRUE);
 
-    atexit(ncurses_end);
+    signal(SIGINT, cleanup_on_terminating_signal);
+    signal(SIGTERM, cleanup_on_terminating_signal);
+    signal(SIGSEGV, cleanup_on_terminating_signal);
 }
 
 void initialize_colors(void)
@@ -2050,99 +2079,54 @@ void initialize_colors(void)
 int read_key()
 {
     int c = getch();
-    switch (c) {
-        case ESC:
-            int next = getch();
-            if (next == ERR) return ESC;
+    if (c != ESC) return c;
 
-            if (getch() != ERR) return ESC;
-            switch (next) { // ALT-X sequence
-                case '0'          : return ALT_0;
-                case '1'          : return ALT_1;
-                case '2'          : return ALT_2;
-                case '3'          : return ALT_3;
-                case '4'          : return ALT_4;
-                case '5'          : return ALT_5;
-                case '6'          : return ALT_6;
-                case '7'          : return ALT_7;
-                case '8'          : return ALT_8;
-                case '9'          : return ALT_9;
+    int first = getch();
+    if (first == ERR) return ESC;
 
-                case 'k'          : return ALT_k;
-                case 'K'          : return ALT_K;
-                case 'j'          : return ALT_j;
-                case 'J'          : return ALT_J;
-                case 'h'          : return ALT_h;
-                case 'H'          : return ALT_H;
-                case 'l'          : return ALT_l;
-                case 'L'          : return ALT_L;
-                case 'm'          : return ALT_m;
-                case 'n'          : return ALT_n;
-                case 'p'          : return ALT_p;
-                case KEY_BACKSPACE: return ALT_BACKSPACE;
-                case ':'          : return ALT_COLON;
-                default           : return ESC;
-            }
-        default: return c;
+    if (first == '[') { // ESC-[-X sequence
+        int second = getch();
+        if (second == ERR) return ESC;
+        log_this("Read ESC-[-%c sequence", first);
+
+        return ESC; // TODO: togli
+
+        switch (second) { default: return ESC; }
     }
-}
 
-/* Use the ESC [6n escape sequence to query the horizontal cursor position
- * and return it. On error false is returned, on success the position of the
- * cursor is stored at *rows and *cols and true is returned. */
-bool get_cursor_position(size_t *rows, size_t *cols)
-{
-    /* Report cursor location */
-    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return false;
+    switch (first) { // ALT-X sequence
+        case '0'          : return ALT_0;
+        case '1'          : return ALT_1;
+        case '2'          : return ALT_2;
+        case '3'          : return ALT_3;
+        case '4'          : return ALT_4;
+        case '5'          : return ALT_5;
+        case '6'          : return ALT_6;
+        case '7'          : return ALT_7;
+        case '8'          : return ALT_8;
+        case '9'          : return ALT_9;
 
-    char buf[32];
-    size_t i = 0;
-    /* Read the response: ESC [ rows ; cols R */
-    while (i < sizeof(buf)-1) {
-        if (read(STDIN_FILENO, buf+i, 1) != 1) break;
-        if (buf[i] == 'R') break;
-        i++;
+        case 'k'          : return ALT_k;
+        case 'K'          : return ALT_K;
+        case 'j'          : return ALT_j;
+        case 'J'          : return ALT_J;
+        case 'h'          : return ALT_h;
+        case 'H'          : return ALT_H;
+        case 'l'          : return ALT_l;
+        case 'L'          : return ALT_L;
+        case 'm'          : return ALT_m;
+        case 'n'          : return ALT_n;
+        case 'p'          : return ALT_p;
+        case KEY_BACKSPACE: return ALT_BACKSPACE;
+        case ':'          : return ALT_COLON;
+
+        case CTRL('K'): return CTRL_ALT_K;
+        case CTRL('J'): return CTRL_ALT_J;
+        case CTRL('H'): return CTRL_ALT_H;
+        case CTRL('L'): return CTRL_ALT_L;
+
+        default: return ESC;
     }
-    buf[i] = '\0';
-
-    /* Parse it. */
-    if (buf[0] != ESC || buf[1] != '[') return false;
-    if (sscanf(buf+2, "%zu;%zu", rows, cols) != 2) return false;
-    return true;
-}
-
-/* Try to get the number of columns in the current terminal. If the ioctl()
- * call fails the function will try to query the terminal itself.
- * Returns true on success, false on error. */
-bool get_window_size(size_t *rows, size_t *cols)
-{
-    struct winsize ws;
-
-    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        /* ioctl() failed. Try to query the terminal itself. */
-        //int orig_row, orig_col, res;
-
-        ///* Get the initial position so we can restore it later. */
-        //res = get_cursor_position(&orig_row,&orig_col);
-        //if (res == -1) return false;
-        if (write(STDOUT_FILENO, ANSI_SAVE_CURSOR, 4) != 4) return false;
-
-        /* Go to right/bottom margin and get position. */
-        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return false;
-        if (!get_cursor_position(rows, cols)) return false;
-
-        /* Restore position. */
-        if (write(STDOUT_FILENO, ANSI_RESTORE_CURSOR, 4) != 4) return false;
-        //char seq[32];
-        //snprintf(seq,32,"\x1b[%d;%dH",orig_row,orig_col);
-        //if (write(ofd,seq,strlen(seq)) == -1) {
-        //    /* Can't recover... */
-        //}
-    } else {
-        *cols = ws.ws_col;
-        *rows = ws.ws_row;
-    }
-    return true;
 }
 
 void update_window_main(void)
@@ -2460,30 +2444,30 @@ bool open_file(char *filename)
 
 void scroll_up() // TODO: cy va oltre
 { 
-    if (editor.offset > N_OR_DEFAULT(0)) {
-        editor.offset -= N_OR_DEFAULT(1);
-        editor.cy += N_OR_DEFAULT(1);
+    if (editor.offset > 0) {
+        editor.offset--;
+        move_cursor_down();
     } else editor.offset = 0;
 }
 
 void scroll_down() // TODO: cy fa cose strane
 {
-    if (editor.offset < editor.rows.count-N_OR_DEFAULT(0)-1) {
-        editor.offset += N_OR_DEFAULT(1);
-        editor.cy -= N_OR_DEFAULT(1);
+    if (editor.offset < editor.rows.count - 1) {
+        editor.offset++;
+        move_cursor_up();
     } else editor.offset = editor.rows.count-1;
 }
 
 void move_page_up() // TODO: non funziona benissimo
 {
-    if (editor.page > N_OR_DEFAULT(0)) editor.page -= N_OR_DEFAULT(1);
+    if (editor.page > 0) editor.page--;
     else editor.page = 0;
     editor.offset = editor.page*win_main.height + editor.cy;
 }             
 
 void move_page_down() // TODO: non funziona benissimo
 {
-    if (editor.page < N_PAGES-N_OR_DEFAULT(0)-1) editor.page += N_OR_DEFAULT(1);
+    if (editor.page < N_PAGES-2) editor.page++;
     else editor.page = N_PAGES-1;
     editor.offset = editor.page*win_main.height + editor.cy;
 }           
@@ -2684,10 +2668,38 @@ bool set_N(int key)
     return true;
 }
 
+void complete_snippet(void)
+{
+    Snippet *snippet_to_expand = NULL;
+    da_foreach (editor.snippets, Snippet, snippet) {
+        log_this("Snippet: '%s' (%zu) -> '%s'", snippet->handle, snippet->handle_len, snippet->expansion);
+        if (CURRENT_X_POS < snippet->handle_len) continue;
+        size_t i = 0;
+        bool matches = true;
+        while (i < snippet->handle_len) {
+            char c = CHAR(CURRENT_Y_POS, CURRENT_X_POS-i-1);
+            log_this("Comparing characters '%c' - '%c'", snippet->handle[i], c);
+            if (snippet->handle[i] != c) {
+                matches = false;
+                break;
+            }
+            i++;
+        }    
+        if (matches && (!snippet_to_expand || snippet->handle_len > snippet_to_expand->handle_len))
+            snippet_to_expand = snippet;
+    }
+    if (!snippet_to_expand) {
+        write_message("ERROR: no expansion found");
+        return;
+    }
+    write_message("TODO: perform expansion from handle '%s'", snippet_to_expand->handle);
+}
+
 void process_pressed_key(void)
 {
     int key = read_key();
     if (key == ERR) return;
+    log_this("Read key %d", key);
 
     bool has_inserted_number = false;
 
@@ -2706,9 +2718,16 @@ void process_pressed_key(void)
             if (set_N(key)) has_inserted_number = true;
             break;
 
+        case KEY_UP:
         case ALT_k: N_TIMES move_cursor_up();    break;
+
+        case KEY_DOWN:
         case ALT_j: N_TIMES move_cursor_down();  break;
+
+        case KEY_LEFT:
         case ALT_h: N_TIMES move_cursor_left();  break;
+
+        case KEY_RIGHT:
         case ALT_l: N_TIMES move_cursor_right(); break;
 
         case ALT_K: move_cursor_begin_of_screen(); break;
@@ -2717,29 +2736,42 @@ void process_pressed_key(void)
         case ALT_L: move_cursor_last_non_space();  break;
 
         case ALT_m:
-            editor.is_showing_message = !editor.is_showing_message;
+            if (!cs_is_empty(editor.messages)) {
+                    editor.is_showing_message = !editor.is_showing_message;
+            }
             break;
 
         case ALT_p:
-            if (editor.in_cmd) cs_previous(&editor.cmds_history);
-            else cs_previous(&editor.messages);
+            if (editor.in_cmd) {
+                char *previous_command = cs_previous(&editor.commands_history);
+                size_t len = strlen(previous_command);
+                s_clear(&editor.cmd);
+                s_push_str(&editor.cmd, previous_command, len);
+                editor.cmd_pos = len;
+            } else cs_previous(&editor.messages);
             break;
 
         case ALT_n:
-            if (editor.in_cmd) cs_next(&editor.cmds_history);
-            else cs_next(&editor.messages);
+            if (editor.in_cmd) {
+                char *next_command = cs_next(&editor.commands_history);
+                size_t len = strlen(next_command);
+                s_clear(&editor.cmd);
+                s_push_str(&editor.cmd, next_command, len);
+                editor.cmd_pos = len;
+            } else cs_next(&editor.messages);
             break;
 
-        //case CTRL_K: N_TIMES scroll_up();                          break;
-        //case CTRL_J: N_TIMES scroll_down();                        break;
+        case CTRL_K: N_TIMES scroll_up();   break;
+        case CTRL_J: N_TIMES scroll_down(); break;
+
         //case CTRL_H: write_message("TODO: CTRL-H"); break;
         //case CTRL_L: write_message("TODO: CTRL-L"); break;
 
-        //case PAGE_UP:
-        //case ALT_k: N_TIMES move_page_up();                      break; 
+        case KEY_PPAGE:
+        case CTRL_ALT_K: N_TIMES move_page_up(); break; 
 
-        //case PAGE_DOWN:
-        //case ALT_j: N_TIMES move_page_down();                    break;
+        case KEY_NPAGE:
+        case CTRL_ALT_J: N_TIMES move_page_down(); break;
 
         //case ALT_h: write_message("TODO: ALT-h"); break;
         //case ALT_l: write_message("TODO: ALT-l"); break;
@@ -2765,6 +2797,10 @@ void process_pressed_key(void)
             }
             break;
 
+        case KEY_BTAB:
+            complete_snippet();
+            break;
+
         case ENTER: // TODO: se si e' in_cmd si esegue execute_command (che fa anche il resto)
             N_TIMES insert_char('\n');
             break;
@@ -2783,9 +2819,10 @@ void process_pressed_key(void)
 
         case ESC:
             if (editor.in_cmd) {
+                s_push_null(&editor.cmd);
+                cs_push(&editor.commands_history, editor.cmd.items);
                 editor.in_cmd = false;
                 editor.cmd_pos = 0;
-                // TODO: maybe save now the command to the history
                 s_clear(&editor.cmd);
             }
             break;
@@ -2815,6 +2852,15 @@ int main(int argc, char **argv)
     initialize_colors();
     create_windows();
 
+    { // TODO: prova
+        Snippet s = {
+            .handle = "ejad",
+            .handle_len = 4,
+            .expansion = "daje roma daje"
+        };
+        da_push(&editor.snippets, s);
+    }
+
     if (!open_file(filename)) {
         if (filename) print_error_and_exit("Could not open file `%s`. %s.\n", filename, errno ? strerror(errno) : "");
         else          print_error_and_exit("Could not open new file. %s.\n", errno ? strerror(errno) : "");
@@ -2827,5 +2873,7 @@ int main(int argc, char **argv)
         doupdate();
     }
 
+    // NOTE: this code should be unreachable
+    ncurses_end();
     return 0;
 }
