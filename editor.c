@@ -26,6 +26,8 @@
 static inline bool streq(const char *s1, const char *s2) { return strcmp(s1, s2) == 0; }
 static inline bool strneq(const char *s1, const char *s2, size_t n) { return strncmp(s1, s2, n) == 0; }
 
+#define BOOL_AS_CSTR(value) ((value) ? "true" : "false")
+
 typedef struct
 {
     String content;
@@ -55,9 +57,48 @@ typedef struct
 
 typedef struct
 {
-    char *handle; // reversed
+    size_t x;
+    size_t y;
+} Cursor;
+
+typedef struct
+{
+    Cursor *items;
+    size_t count;
+    size_t capacity;
+    bool is_enabled;
+} MultiCursor;
+
+typedef struct
+{
+    Cursor **items;
+    size_t count;
+    size_t capacity;
+} CursorPtrs;
+
+typedef struct
+{
+    char *name;
+    Cursor cursor;
+    bool is_primary;
+} SnippetMark;
+
+typedef struct
+{
+    SnippetMark *items;
+    size_t count;
+    size_t capacity;
+} SnippetMarks;
+
+typedef struct
+{
+    char *handle;
     size_t handle_len;
-    char *expansion;
+    char *body;
+    bool is_inline;
+    bool handle_is_prefix;
+    SnippetMark *marks;
+    size_t marks_count;
 } Snippet;
 
 typedef struct
@@ -67,14 +108,71 @@ typedef struct
     size_t capacity;
 } Snippets;
 
+typedef enum
+{
+    PISQUY_INT,
+    PISQUY_UINT,
+    PISQUY_STRING,
+    PISQUY_BOOL,
+    PISQUY_ARG_PLACEHOLDER,
+    PISQUY_TYPES_COUNT
+} PisquyType;
+
 typedef struct
 {
+    PisquyType type;
+    union {
+        int int_value;
+        size_t uint_value;
+        char *string_value;
+        bool bool_value;
+    };
+    char *name;
+} Var;
+
+typedef struct
+{
+    Var *items;
+    size_t count;
+    size_t capacity;
+} Vars;
+
+typedef enum { LN_NO, LN_ABS, LN_REL } ConfigLineNumbers;
+typedef enum { CONFIGLOG_ALL, CONFIGLOG_WARNING, CONFIGLOG_ERROR } ConfigLogLevel;
+
+typedef struct
+{
+    size_t quit_times;
+    ConfigLineNumbers line_numbers;
+    bool tab_to_spaces;
+    size_t tab_spaces_number;
+    ConfigLogLevel configlog_level;
+
+    Vars vars;
+} Config;
+
+typedef enum
+{
+    CONFIG_QUIT_TIMES,
+    CONFIG_LINE_NUMBERS,
+    CONFIG_TAB_TO_SPACES,
+    CONFIG_TAB_SPACES_NUMBER,
+    CONFIG_CONFIGLOG_LEVEL,
+
+    CONFIG_FIELDS_COUNT
+} __ActualConfigFields;
+
+typedef struct
+{
+    char *filepath;
     char *filename;
     Rows rows;
     int dirty;
 
-    size_t cx;
-    size_t cy;
+    Cursor cursor;
+    MultiCursor multicursor;
+    CursorPtrs sorted_multicursor;
+
     size_t offset;
     size_t screen_rows;
     size_t screen_cols;
@@ -89,10 +187,19 @@ typedef struct
     CyclableStrings commands_history;
 
     Snippets snippets;
+    struct {
+        Snippet *snippet;
+        int mark_index;
+        Cursor base_cursor;
+        SnippetMarks active_marks;
+    } expanding_snippet;
+
+    Config config;
 
     size_t current_quit_times;
 
-    int N; // multiplicity for the commands
+    int N;
+
 } Editor;
 static Editor editor = {0};
 
@@ -100,9 +207,11 @@ static Editor editor = {0};
 #define N_OR_DEFAULT(n) (assert(n >= 0), (size_t)(editor.N == N_DEFAULT ? (n) : editor.N))
 #define N_TIMES for (size_t i = 0; i < N_OR_DEFAULT(1); i++)
 
-#define LINE_NUMBERS_SPACE (config.line_numbers == LN_NO ? 0 : (size_t)log10(editor.rows.count)+3)
-#define CURRENT_Y_POS (editor.offset+editor.cy)
-#define CURRENT_X_POS (editor.cx)
+#define LINE_NUMBERS_SPACE \
+    (editor.config.line_numbers == LN_NO ? 0 : (size_t)log10(editor.rows.count == 0 ? 1 : editor.rows.count)+3)
+
+#define CURRENT_Y_POS (editor.offset+editor.cursor.y)
+#define CURRENT_X_POS (editor.cursor.x)
 #define ROW(i) (assert((i) <= editor.rows.count), &editor.rows.items[i])
 #define CURRENT_ROW ROW(CURRENT_Y_POS)
 #define LINE(i) (ROW(i)->content.items)
@@ -161,6 +270,8 @@ typedef enum
     ALT_h,
     ALT_l,
 
+    ALT_c,
+    ALT_C,
     ALT_K,
     ALT_J,
     ALT_H,
@@ -170,6 +281,7 @@ typedef enum
     ALT_n,
     ALT_p,
 
+    CTRL_ALT_C,
     CTRL_ALT_K,
     CTRL_ALT_J,
     CTRL_ALT_H,
@@ -242,6 +354,66 @@ void write_message(const char *fmt, ...)
     if (!editor.in_cmd) editor.is_showing_message = true;
 }
 
+static inline bool editor_is_expanding_snippet(void) { return editor.expanding_snippet.snippet != NULL; }
+
+/// BEGIN Cursors
+
+int compare_cursors_reverse(const void *p1, const void *p2)
+{
+    Cursor *c1 = *(Cursor **)p1;
+    Cursor *c2 = *(Cursor **)p2;
+    if (c1->y != c2->y) return c2->y - c1->y;
+    return c2->x - c1->x;
+}
+
+void add_multicursor_mark(void)
+{
+    if (editor.multicursor.is_enabled || editor.in_cmd) return;
+
+    da_foreach (editor.multicursor, Cursor, cursor)
+        if (editor.cursor.x == cursor->x && editor.cursor.y == cursor->y)
+            return;
+
+    da_push(&editor.multicursor, editor.cursor);
+    write_message("Added cursor mark at (%zu, %zu)", editor.cursor.x, editor.cursor.y);
+}
+
+void sort_multicursor(void)
+{
+    da_clear(&editor.sorted_multicursor);
+    da_push(&editor.sorted_multicursor, &editor.cursor);
+    
+    da_foreach (editor.multicursor, Cursor, cursor)
+        if (editor.cursor.x != cursor->x || editor.cursor.y != cursor->y)
+            da_push(&editor.sorted_multicursor, cursor);
+
+    qsort(editor.sorted_multicursor.items, editor.sorted_multicursor.count, sizeof(Cursor*), compare_cursors_reverse);
+}
+
+void enable_multicursor(void)
+{
+    if (editor.multicursor.is_enabled || editor.in_cmd) return;
+
+    if (!da_is_empty(&editor.multicursor)) {
+        sort_multicursor();
+        editor.multicursor.is_enabled = true;
+        //write_message("Multicursor has been enabled");
+    } //else write_message("No marks to enable multicursor");
+}
+
+void disable_multicursor(void)
+{
+    if (!editor.multicursor.is_enabled || editor.in_cmd) return;
+
+    da_clear(&editor.multicursor);
+    editor.multicursor.is_enabled = false;
+
+    if (editor_is_expanding_snippet()) editor.expanding_snippet.snippet = NULL;
+    //else write_message("Multicursor has been disabled and all marks have been cleared");
+}
+
+/// END Cursors
+
 /// BEGIN Commands
 
 typedef enum
@@ -283,16 +455,6 @@ static_assert(BUILTIN_CMDS_COUNT == 14, "Associate a name to all builtin command
 #define INSERT            "ins"
 #define DATE              "date"
 #define GOTO_LINE         "goto"
-
-typedef enum
-{
-    PISQUY_INT,
-    PISQUY_UINT,
-    PISQUY_STRING,
-    PISQUY_BOOL,
-    PISQUY_ARG_PLACEHOLDER,
-    PISQUY_TYPES_COUNT
-} PisquyType;
 
 typedef struct
 {
@@ -607,26 +769,6 @@ char *read_file(char *path)
     return content;
 }
 
-typedef struct
-{
-    PisquyType type;
-    union {
-        int int_value;
-        size_t uint_value;
-        char *string_value;
-        bool bool_value;
-    };
-    char *name;
-} Var;
-
-typedef struct
-{
-    Var *items;
-    size_t count;
-    size_t capacity;
-} Vars;
-static Vars vars = {0};
-
 typedef enum
 {
     TOKEN_IDENT = 256,
@@ -639,6 +781,7 @@ typedef enum
     TOKEN_SET,
     TOKEN_VAR,
     TOKEN_DEF,
+    TOKEN_SNIPPET,
 
     TOKEN_NEWLINE,
     TOKEN_EOF,
@@ -656,39 +799,59 @@ typedef struct
     Location loc;
 } Token;
 
-static_assert(ACTUAL_TOKENS_COUNT == 10, "token_type_as_cstr");
-char *token_type_as_cstr(TokenType type)
+static_assert(ACTUAL_TOKENS_COUNT == 11, "token type string");
+#define TOKEN_CHAR_STRING         "char"
+#define TOKEN_CONTROL_CHAR_STRING "control char"
+#define TOKEN_IDENT_STRING        "identifier"
+#define TOKEN_NUMBER_STRING       "number"
+#define TOKEN_STRING_STRING       "string"
+#define TOKEN_TRUE_STRING         "true"
+#define TOKEN_FALSE_STRING        "false"
+#define TOKEN_SET_STRING          "set"
+#define TOKEN_VAR_STRING          "var"
+#define TOKEN_DEF_STRING          "def"
+#define TOKEN_SNIPPET_STRING      "snippet"
+#define TOKEN_NEWLINE_STRING      "new line"
+#define TOKEN_EOF_STRING          "EOF"
+
+static_assert(ACTUAL_TOKENS_COUNT == 11, "token_type_as_string");
+char *token_type_as_string(TokenType type)
 {
+    const size_t size = 128*sizeof(char);
+    char *result = malloc(size);
+    memset(result, 0, size);
     if (type >= 0 && type <= 255) {
-        if (isprint(type)) return "char";
-        else               return "control char";
+        if (isprint(type)) sprintf(result, "char '%c'", type);
+        else               sprintf(result, "control char %d", type);
     } else {
         switch (type)
         {
-            case TOKEN_IDENT:   return "identifier";
-            case TOKEN_NUMBER:  return "number";
-            case TOKEN_STRING:  return "string";
-            case TOKEN_TRUE:    return "true";
-            case TOKEN_FALSE:   return "false";
-            case TOKEN_SET:     return "set";
-            case TOKEN_VAR:     return "var";
-            case TOKEN_DEF:     return "def";
-            case TOKEN_NEWLINE: return "new line";
-            case TOKEN_EOF:     return "EOF";
+            case TOKEN_IDENT:   strcat(result, TOKEN_IDENT_STRING);   break;
+            case TOKEN_NUMBER:  strcat(result, TOKEN_NUMBER_STRING);  break;
+            case TOKEN_STRING:  strcat(result, TOKEN_STRING_STRING);  break;
+            case TOKEN_TRUE:    strcat(result, TOKEN_TRUE_STRING);    break;
+            case TOKEN_FALSE:   strcat(result, TOKEN_FALSE_STRING);   break;
+            case TOKEN_SET:     strcat(result, TOKEN_SET_STRING);     break;
+            case TOKEN_VAR:     strcat(result, TOKEN_VAR_STRING);     break;
+            case TOKEN_DEF:     strcat(result, TOKEN_DEF_STRING);     break;
+            case TOKEN_SNIPPET: strcat(result, TOKEN_SNIPPET_STRING); break;
+            case TOKEN_NEWLINE: strcat(result, TOKEN_NEWLINE_STRING); break;
+            case TOKEN_EOF:     strcat(result, TOKEN_DEF_STRING);     break;
             default:            return NULL;
         }
     }
+    return result;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 10, "token_type_and_value_as_str");
-char *token_type_and_value_as_str(Token token)
+static_assert(ACTUAL_TOKENS_COUNT == 11, "token_type_and_value_as_string");
+char *token_type_and_value_as_string(Token token)
 {
     const size_t n = 128;
     char *result = malloc(sizeof(char)*n);
-    char *type = token_type_as_cstr(token.type);
+    char *type = token_type_as_string(token.type);
     if (token.type >= 0 && token.type <= 255) {
-        if (isprint(token.type)) sprintf(result, "%s '%c'", type, token.type);
-        else                     sprintf(result, "%s '%d'", type, token.type);
+        if (isprint(token.type)) sprintf(result, "%s", type);
+        else                     sprintf(result, "%s", type);
     } else {
         switch (token.type)
         {
@@ -704,6 +867,7 @@ char *token_type_and_value_as_str(Token token)
             case TOKEN_SET:
             case TOKEN_VAR:
             case TOKEN_DEF:
+            case TOKEN_SNIPPET:
             case TOKEN_NEWLINE:
             case TOKEN_EOF:
                 sprintf(result, "%s", type);
@@ -711,12 +875,13 @@ char *token_type_and_value_as_str(Token token)
             default: print_error_and_exit("Unreachable");
         }
     }
+    free(type);
     return result;
 }
 
 void token_log(Token token)
 {
-    char *string = token_type_and_value_as_str(token);
+    char *string = token_type_and_value_as_string(token);
     log_this(LOC_FMT" %s", LOC_ARG(token.loc), string);
     free(string);
 }
@@ -728,9 +893,11 @@ bool expect_token_to_be_of_type(Token t, TokenType type, String *s_log)
     if (t.type == type) return true;
 
     if (s_log) {
-        char *tokstrval = token_type_and_value_as_str(t);
+        char *tokstrtype = token_type_as_string(type);
+        char *tokstrval = token_type_and_value_as_string(t);
         s_push_fstr(s_log, LOC_FMT"\n- ERROR: expecting %s but got %s\n", LOC_ARG(t.loc),
-                token_type_as_cstr(type), tokstrval);
+                tokstrtype, tokstrval);
+        free(tokstrtype);
         free(tokstrval);
     }
     return false;
@@ -753,10 +920,12 @@ bool expect_token_to_be_of_types(Token t, TokenType *types, size_t n, String *s_
     if (s_log) {
         s_push_fstr(s_log, LOC_FMT"\n- ERROR: expecting one of the following tokens ", LOC_ARG(t.loc));
         for (size_t i = 0; i < n; i++) {
-            s_push_fstr(s_log, "`%s`", token_type_as_cstr(types[i]));
+            char *tokstrtype = token_type_as_string(types[i]);
+            s_push_fstr(s_log, "`%s`", tokstrtype);
+            free(tokstrtype);
             if (i < n-1) s_push_fstr(s_log, ", ");
         }
-        char *tokstrval = token_type_and_value_as_str(t);
+        char *tokstrval = token_type_and_value_as_string(t);
         s_push_fstr(s_log, " but got %s\n", tokstrval);
         free(tokstrval);
     }
@@ -834,7 +1003,7 @@ bool lexer_get_string(Lexer *l)
     return true;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 10, "lexer_next");
+static_assert(ACTUAL_TOKENS_COUNT == 11, "lexer_next");
 bool lexer_next(Lexer *l)
 {
     if (!l->str) return false;
@@ -872,11 +1041,12 @@ bool lexer_next(Lexer *l)
             c = *l->str;
         }
         l->loc.col += len;
-        if      (strneq(begin, "set", len)) l->token.type = TOKEN_SET;
-        else if (strneq(begin, "var", len)) l->token.type = TOKEN_VAR;
-        else if (strneq(begin, "def", len)) l->token.type = TOKEN_DEF;
-        else if (strneq(begin, "true", len)) l->token.type = TOKEN_TRUE;
-        else if (strneq(begin, "false", len)) l->token.type = TOKEN_FALSE;
+        if      (strneq(begin, TOKEN_SET_STRING,     len)) l->token.type = TOKEN_SET;
+        else if (strneq(begin, TOKEN_VAR_STRING,     len)) l->token.type = TOKEN_VAR;
+        else if (strneq(begin, TOKEN_DEF_STRING,     len)) l->token.type = TOKEN_DEF;
+        else if (strneq(begin, TOKEN_SNIPPET_STRING, len)) l->token.type = TOKEN_SNIPPET;
+        else if (strneq(begin, TOKEN_TRUE_STRING,    len)) l->token.type = TOKEN_TRUE;
+        else if (strneq(begin, TOKEN_FALSE_STRING,   len)) l->token.type = TOKEN_FALSE;
         else {
             l->token.type = TOKEN_IDENT;
             l->token.string_value = malloc(sizeof(char)*len + 1);
@@ -900,7 +1070,7 @@ bool lexer_next(Lexer *l)
     return true;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 10, "lexer_get_current_token");
+static_assert(ACTUAL_TOKENS_COUNT == 11, "lexer_get_current_token");
 Token lexer_get_current_token(Lexer *l)
 {
     Token token = l->token;
@@ -916,6 +1086,7 @@ Token lexer_get_current_token(Lexer *l)
     case TOKEN_SET:
     case TOKEN_VAR:
     case TOKEN_DEF:
+    case TOKEN_SNIPPET:
     case TOKEN_NEWLINE:
     case TOKEN_EOF:
         break;
@@ -931,7 +1102,7 @@ Token lexer_get_current_token(Lexer *l)
     return token;
 }
 
-static_assert(ACTUAL_TOKENS_COUNT == 10, "free_token");
+static_assert(ACTUAL_TOKENS_COUNT == 11, "free_token");
 void free_token(Token *token)
 {
     if (token->loc.path) free(token->loc.path);
@@ -999,10 +1170,10 @@ typedef enum
     FIELD_LIMITED_STRING,
     //FIELD_LIMITED_UINT,
     //FIELD_RANGE_UINT,
-    FIELDS_COUNT,
+    FIELD_TYPES_COUNT,
 } FieldType;
 
-static_assert(FIELDS_COUNT == 5, "fieldtype_to_string");
+static_assert(FIELD_TYPES_COUNT == 5, "fieldtype_to_string");
 char *fieldtype_to_string(FieldType type)
 {
     switch (type)
@@ -1055,65 +1226,46 @@ typedef struct
     size_t capacity;
 } ConfigFields;
 
-ConfigField create_field_bool(char *name, bool *ptr, bool thefault)
-{
-    return (ConfigField){
-        .name = name,
-        .type = FIELD_BOOL,
-        .bool_ptr = ptr,
-        .bool_default = thefault
-    };
-}
+#define macro_make_config_field_bool(field_name) \
+    ((ConfigField){                                \
+        .name = #field_name,                       \
+        .type = FIELD_BOOL,                        \
+        .bool_ptr = &editor.config.field_name,     \
+        .bool_default = default_##field_name       \
+    })
 
-ConfigField create_field_int(char *name, int *ptr, int thefault)
-{
-    return (ConfigField){
-        .name = name,
-        .type = FIELD_INT,
-        .int_ptr = ptr,
-        .int_default = thefault
-    };
-}
+#define macro_make_config_field_int(field_name) \
+    ((ConfigField){                               \
+        .name = #field_name,                      \
+        .type = FIELD_INT,                        \
+        .int_ptr = &editor.config.field_name,     \
+        .int_default = default_##field_name       \
+    })
 
-ConfigField create_field_uint(char *name, size_t *ptr, size_t thefault)
-{
-    return (ConfigField){
-        .name = name,
-        .type = FIELD_UINT,
-        .uint_ptr = ptr,
-        .uint_default = thefault
-    };
-}
+#define macro_make_config_field_uint(field_name) \
+    ((ConfigField){                                \
+        .name = #field_name,                       \
+        .type = FIELD_UINT,                        \
+        .uint_ptr = &editor.config.field_name,     \
+        .uint_default = default_##field_name       \
+    })
 
-ConfigField create_field_string(char *name, char **ptr, char *thefault)
-{
-    return (ConfigField){
-        .name = name,
-        .type = FIELD_STRING,
-        .string_ptr = ptr,
-        .string_default = strdup(thefault)
-    };
-}
+#define macro_make_config_field_string(field_name) \
+    ((ConfigField){                                  \
+        .name = #field_name,                         \
+        .type = FIELD_STRING,                        \
+        .string_ptr = &editor.config.field_name,     \
+        .string_default = default_##field_name       \
+    })
 
-ConfigField create_field_limited_string(char *name, LimitedStringIndex *ptr, LimitedStringIndex thefault, Strings valid_values)
-{
-    return (ConfigField){
-        .name = name,
-        .type = FIELD_LIMITED_STRING,
-        .limited_string_ptr = ptr,
-        .limited_string_default = thefault,
-        .limited_string_valid_values = valid_values
-    };
-}
-
-typedef enum { LN_NO, LN_ABS, LN_REL } ConfigLineNumbers;
-
-typedef struct
-{
-    size_t quit_times;
-    ConfigLineNumbers line_numbers;
-} Config;
-Config config = {0};
+#define macro_make_config_field_limited_string(field_name)                   \
+    ((ConfigField){                                                            \
+        .name = #field_name,                                                   \
+        .type = FIELD_LIMITED_STRING,                                          \
+        .limited_string_ptr = (LimitedStringIndex *)&editor.config.field_name, \
+        .limited_string_default = default_##field_name,                        \
+        .limited_string_valid_values = valid_values_##field_name               \
+    })
 
 void save(void)
 {
@@ -1125,7 +1277,11 @@ void save(void)
 
     // TODO: make the user decide the name of the file if not set
     // - probabilmente devo fare un sistema che permetta di cambiare l'inizio della command line (ora e' sempre Command:) e poi fare cose diverse una volta che si e' premuto ENTER
-    int fd = open(editor.filename, O_RDWR|O_CREAT, 0644);
+    if (!editor.filepath) {
+        write_message("TODO: make the user decide the name of the file", editor.filename);
+        return;
+    }
+    int fd = open(editor.filepath, O_RDWR|O_CREAT, 0644);
     if (fd == -1) goto writeerr;
 
     /* Use truncate + a single write(2) call in order to make saving
@@ -1174,11 +1330,11 @@ _Noreturn void quit()
 
 bool can_quit(void)
 {
-    if (!editor.dirty || editor.current_quit_times == 0) return true;
+    if (!editor.dirty || editor.current_quit_times == 1) return true;
 
-    // TODO: set higher priority messages that overwrite the current (da pensare)
-    write_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.", editor.current_quit_times-1, editor.current_quit_times-1 == 1 ? "" : "s");
     editor.current_quit_times--;
+    write_message("Session is not saved. If you really want to quit press CTRL-q %zu more time%s.",
+            editor.current_quit_times, editor.current_quit_times == 1 ? "" : "s");
     return false;
 }
 
@@ -1203,50 +1359,108 @@ void builtin_force_quit(Command *cmd, CommandArgs *args)
     quit();
 }
 
-void move_cursor_up(void)
+void move_cursor_up_internal(void)
 {
-    if (editor.cy == 0 && editor.page != 0) {
+    if (editor.cursor.y == 0 && editor.page != 0) {
         editor.offset--;
         // TODO: deve cambiare anche la pagina, ma come?
     }
-    if (editor.cy - 1 > 0) editor.cy--;
-    else editor.cy = 0;
+    if (editor.cursor.y - 1 > 0) editor.cursor.y--;
+    else editor.cursor.y = 0;
 }
 
-void move_cursor_down(void)
+void move_cursor_up(void)
+{
+    move_cursor_up_internal();
+    if (editor.multicursor.is_enabled) {
+        Cursor saved = editor.cursor;
+        da_foreach (editor.multicursor, Cursor, cursor) {
+            editor.cursor = *cursor;
+            move_cursor_up_internal();
+            *cursor = editor.cursor;
+        }
+        editor.cursor = saved;
+    }
+}
+
+void move_cursor_down_internal(void)
 { 
     //if ((editor.offset+N_OR_DEFAULT(1) / N_PAGES) > editor.page) editor.page += (editor.offset+N_OR_DEFAULT(1)) / N_PAGES; // TODO: No, non funziona cosi' devo modificare l'offset in questo caso
-    if (editor.cy == win_main.height-1 && editor.page != N_PAGES-1) {
+    if (editor.cursor.y == win_main.height-1 && editor.page != N_PAGES-1) {
         editor.offset++;
         // TODO: deve cambiare anche la pagina, ma come?
     }
-    if (editor.cy + 1 < win_main.height-1) editor.cy++;
-    else editor.cy = win_main.height-1;
+    if (editor.cursor.y + 1 < win_main.height-1) editor.cursor.y++;
+    else editor.cursor.y = win_main.height-1;
     //if (editor.offset < editor.rows.count-N_OR_DEFAULT(0)-1) editor.offset += N_OR_DEFAULT(1); 
     //else editor.offset = editor.rows.count-1;
 }
 
-void move_cursor_left(void)
+void move_cursor_down(void)
+{
+    move_cursor_down_internal();
+    if (editor.multicursor.is_enabled) {
+        Cursor saved = editor.cursor;
+        da_foreach (editor.multicursor, Cursor, cursor) {
+            editor.cursor = *cursor;
+            move_cursor_down_internal();
+            *cursor = editor.cursor;
+        }
+        editor.cursor = saved;
+    }
+}
+
+void move_cursor_left_internal(void)
 {
     if (editor.in_cmd) {
         if (editor.cmd_pos > 0) editor.cmd_pos--;
         else editor.cmd_pos = 0;
     } else {
-        if (editor.cx > 0) editor.cx--;
-        else editor.cx = 0;
+        if (editor.cursor.x > 0) editor.cursor.x--;
+        else editor.cursor.x = 0;
     }
 }
 
-void move_cursor_right(void)
+void move_cursor_left(void)
+{
+    move_cursor_left_internal();
+    if (editor.multicursor.is_enabled) {
+        Cursor saved = editor.cursor;
+        da_foreach (editor.multicursor, Cursor, cursor) {
+            editor.cursor = *cursor;
+            move_cursor_left_internal();
+            *cursor = editor.cursor;
+        }
+        editor.cursor = saved;
+    }
+}
+
+
+void move_cursor_right_internal(void)
 {
     if (editor.in_cmd) {
         if (editor.cmd_pos < editor.cmd.count-1) editor.cmd_pos++;
         else editor.cmd_pos = editor.cmd.count;
     } else {
-        if (editor.cx < win_main.width-1) editor.cx++;
-        else editor.cx = win_main.width-1;
+        if (editor.cursor.x < win_main.width-1) editor.cursor.x++;
+        else editor.cursor.x = win_main.width-1;
     }
 }
+
+void move_cursor_right(void)
+{
+    move_cursor_right_internal();
+    if (editor.multicursor.is_enabled) {
+        Cursor saved = editor.cursor;
+        da_foreach (editor.multicursor, Cursor, cursor) {
+            editor.cursor = *cursor;
+            move_cursor_right_internal();
+            *cursor = editor.cursor;
+        }
+        editor.cursor = saved;
+    }
+}
+
 
 void builtin_move_cursor(Command *cmd, CommandArgs *args) 
 {
@@ -1304,7 +1518,7 @@ void insert_char_at(Row *row, size_t at, int c)
 #define WITH_LOCATION true
 Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with_location)
 {
-    log_this("Parsing commands list");
+    //log_this("Parsing commands list");
     Command cmd = {0};
     size_t i = *index;
     Token tok_it = tokens.items[i];
@@ -1342,9 +1556,9 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
         }
 
         char *subcmd_name = tok_it.string_value;
-        log_this("subcommand name: %s", subcmd_name);
+        //log_this("subcommand name: %s", subcmd_name);
         CommandType subcmd_type = get_command_type_from_string(subcmd_name);
-        log_this("subcommand type: %s", get_command_type_as_cstr(subcmd_type));
+        //log_this("subcommand type: %s", get_command_type_as_cstr(subcmd_type));
         if (subcmd_type == UNKNOWN) {
             if (log) {
                 if (with_location) {
@@ -1369,7 +1583,7 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
         tok_it = tokens.items[i];
 
         if (tok_it.type == '(') {
-            log_this("TODO: parse arguments list for command `%s`", subcmd_name);
+            //log_this("TODO: parse arguments list for command `%s`", subcmd_name);
             i++;
             tok_it = tokens.items[i];
             while (can_continue() && tok_it.type != ')') {
@@ -1388,12 +1602,12 @@ Command parse_commands_list(Tokens tokens, size_t *index, String *log, bool with
         da_push(&cmd.subcmds, subcmd);
     }
     *index = i;
-    log_this("Done parsing command list");
+    //log_this("Done parsing command list");
     return cmd;
 }
 
-void execute_command(Command *cmd, CommandArgs *args); // forward declaration
-void insert_char(char c)
+void execute_command(Command *cmd, CommandArgs *args);
+void insert_char_internal(char c)
 {
     if (editor.in_cmd) {
         if (c == '\n') {
@@ -1404,13 +1618,13 @@ void insert_char(char c)
             s_clear(&editor.cmd);
             editor.cmd_pos = 0;
 
-            log_this("Lexing command line `%s`", cmd_str);
+            //log_this("Lexing command line `%s`", cmd_str);
             CommandArgs runtime_args = {0};
             Tokens tokens = lex_string(cmd_str);
-            log_this("Lexed command line:");
+            //log_this("Lexed command line:");
             da_foreach (tokens, Token, tok) {
-                char *tokstrval = token_type_and_value_as_str(*tok);
-                log_this(" - %s", tokstrval);
+                char *tokstrval = token_type_and_value_as_string(*tok);
+                //log_this(" - %s", tokstrval);
                 free(tokstrval);
             }
 
@@ -1425,9 +1639,9 @@ void insert_char(char c)
             if (parse_log.items) s_free(&parse_log);
             if (error) return;
 
-            log_this("Ready to execute command from line -> type %u", cmd_from_line.type);
+            //log_this("Ready to execute command from line -> type %u", cmd_from_line.type);
             for (size_t i = 0; i < cmd_from_line.subcmds.count; i++) {
-                log_this("- %s", cmd_from_line.subcmds.items[i].name);
+                //log_this("- %s", cmd_from_line.subcmds.items[i].name);
             }
 
             cmd_from_line.name = "command from line";
@@ -1464,9 +1678,9 @@ void insert_char(char c)
                 row->content.count = x;
             }
         }
-        if (editor.cy == win_main.height-1) editor.offset++;
-        else editor.cy++;
-        editor.cx = 0;
+        if (editor.cursor.y == win_main.height-1) editor.offset++;
+        else editor.cursor.y++;
+        editor.cursor.x = 0;
     } else {
         if (y >= editor.rows.count) {
             while (editor.rows.count <= y) {
@@ -1475,19 +1689,75 @@ void insert_char(char c)
             }
         }
         insert_char_at(CURRENT_ROW, x, c);
-        editor.cx++;
+        editor.cursor.x++;
     }
     editor.dirty++;
+}
+
+void insert_char(char c)
+{
+    if (!editor.multicursor.is_enabled || editor.in_cmd) {
+        insert_char_internal(c);
+        return;
+    }
+
+    Cursor saved_main = editor.cursor;
+
+    for (size_t i = 0; i < editor.sorted_multicursor.count; i++) {
+        Cursor *current = editor.sorted_multicursor.items[i];
+        editor.cursor = (current == &editor.cursor) ? saved_main : *current;
+        insert_char_internal(c);
+        if (current == &editor.cursor) saved_main = editor.cursor;
+        else {
+            *current = editor.cursor;
+            editor.cursor = saved_main;
+        }
+
+        for (size_t j = 0; j < i; j++) {
+            Cursor *processed = editor.sorted_multicursor.items[j];
+            
+            if (c == '\n') {
+                // If we inserted a newline, shift rows below down
+                if (processed->y > current->y) {
+                    processed->y++; 
+                    // Note: You might want to reset x to 0 or keep relative, 
+                    // strictly editor.cursor.x resets on newline in insert_internal
+                } 
+                // If the processed cursor was on the same line (to the right),
+                // it essentially got moved to the new line.
+                else if (processed->y == current->y - 1) { // -1 because current->y incremented
+                     // Complex case: intra-line split.
+                     // For simplicity in this snippet, we assume standard behavior.
+                     processed->y++;
+                     processed->x -= current->x; // Shift X relative to split
+                }
+            } else {
+                // Standard char: shift X if on same row
+                // current->y matches processed->y because we sorted reverse.
+                // If they are on the same line, processed MUST be to the right.
+                if (processed->y == current->y) {
+                    processed->x++;
+                }
+            }
+            if (processed == &editor.cursor) saved_main = *processed;
+        }
+    }
+    editor.cursor = saved_main;
+}
+
+void insert_cstr(char *string)
+{
+    const size_t len = strlen(string);
+    for (size_t i = 0; i < len; i++) {
+        insert_char(string[i]);
+    }
 }
 
 void builtin_insert(Command *cmd, CommandArgs *args)
 {
     if (!expect_n_arguments(cmd, args, 1)) return;
-    char *str = args->items[0].string_value;
-    size_t len = strlen(str);
-    for (size_t j = 0; j < len; j++) {
-        insert_char(str[j]);
-    }
+    char *string = args->items[0].string_value;
+    insert_cstr(string);
 }
 
 void builtin_date(Command *cmd, CommandArgs *args)
@@ -1502,7 +1772,6 @@ void builtin_date(Command *cmd, CommandArgs *args)
         write_message("Could not get date");
         return;
     }
-    log_this("%s", date);
     for (size_t i = 0; i < strlen(date); i++) {
         insert_char(date[i]);
     }
@@ -1515,6 +1784,150 @@ void builtin_goto_line(Command *cmd, CommandArgs *args)
     write_message("TODO: goto line %zu", line);
 }
 
+#define SNIPPET_BODY_INDENTATION 4
+bool parse_snippet_body(Token token_body, Snippet *snippet, String *log)
+{
+    char *body = token_body.string_value;
+    assert(body);
+    size_t len = strlen(body);
+    if (len == 0) {
+        s_push_fstr(log, LOC_FMT"\n- ERROR: empty snippet body\n\n");
+        return false;
+    }
+    snippet->is_inline = strchr(body, '\n') == NULL;
+    if (!snippet->is_inline) {
+        if (body[0] != '{' || body[len-1] != '}') {
+            s_push_fstr(log, LOC_FMT"\n- ERROR: multiline snippet body must be enclosed in curly brackets\n\n",
+                    LOC_ARG(token_body.loc));
+            return false;
+        }
+        body[len-1] = '\0';
+        body++;
+        while (*body && isblank(*body)) body++;
+        if (*body != '\n') {
+            s_push_fstr(log, LOC_FMT"\n- ERROR: newline needed after '{' in multiline snippet definition\n\n",
+                    LOC_ARG(token_body.loc));
+            return false;
+        }
+        body++;
+        len = strlen(body);
+        if (len == 0) {
+            s_push_fstr(log, LOC_FMT"\n- WARNING: empty snippet body\n\n", LOC_ARG(token_body.loc));
+            return false;
+        }
+    }
+
+    Location loc = {
+        .row = token_body.loc.row+1,
+        .col = 0,
+        .path = token_body.loc.path
+    };
+    String parsed_body = {0};
+    size_t i = 0;
+    Cursor cursor = {0};
+    SnippetMarks marks_da = {0};
+
+    while (i < len) {
+        if (!snippet->is_inline) {
+            if (body[i] == '\n') {
+                // NOTE: empty line cannot have indentation
+            } else if (body[i] == '\t') {
+                body++;
+                loc.col++;
+            } else {
+                // TODO: maybe just calculate the indentation of the first non empty line and use it afterwards
+                size_t indentation = 0;
+                while (i < len && indentation < SNIPPET_BODY_INDENTATION && body[i] == ' ') {
+                    i++;
+                    indentation++;
+                    loc.col++;
+                }
+                if (indentation < SNIPPET_BODY_INDENTATION && body[i] != '\n') {
+                    s_push_fstr(log, LOC_FMT"\n- ERROR: incorrect indentation (should be a tab or %d spaces but is just %zu space%s)\n\n", LOC_ARG(loc), SNIPPET_BODY_INDENTATION, indentation, indentation == 1 ? "" : "s");
+                    return false;
+                }
+            }
+        }
+        while (i < len && body[i] != '\n') {
+            if (body[i] == '\\' && i+1 < len && body[i+1] == '$') {
+                i++;
+                loc.col++;
+            } else if (body[i] == '$') {
+                //log_this("Parsing snippet mark at "LOC_FMT, LOC_ARG(loc));
+                SnippetMark mark = {
+                    .name = NULL,
+                    .cursor = cursor,
+                    .is_primary = true
+                };
+                i++;
+                loc.col++;
+                if (i >= len || body[i] != '{') {
+                    da_push(&marks_da, mark);
+                    //log_this("snippet mark without name at (%zu, %zu)", mark.cursor.x, mark.cursor.y);
+                    continue;
+                }
+                i++;
+                loc.col++;
+                char *name = body+i;
+                while (i < len-1 && body[i] != '\n' && body[i] != '}') {
+                    i++;
+                    loc.col++;
+                }
+                if (i >= len-1 || body[i] == '\n') {
+                    s_push_fstr(log, LOC_FMT"\n- ERROR: unclosed named mark bracket\n\n", LOC_ARG(loc));
+                    return false;
+                }
+                body[i] = '\0';
+                mark.name = strdup(name);
+                da_foreach (marks_da, SnippetMark, m) {
+                    if (streq(m->name, mark.name)) {
+                        mark.is_primary = false;
+                        break;
+                    }
+                }
+                da_push(&marks_da, mark);
+                //log_this("snippet mark `%s` at (%zu, %zu)", mark.name, mark.cursor.x, mark.cursor.y);
+                i++;
+            }
+            s_push(&parsed_body, body[i]);
+            i++;
+            loc.col++;
+            cursor.x++;
+        }
+        if (!snippet->is_inline) {
+            if (i >= len) {
+                s_push_fstr(log, LOC_FMT"\n- ERROR: unexpected end of snippet body, it should end with a newline\n\n",
+                        LOC_ARG(loc));
+                return false;
+            }
+            s_push(&parsed_body, '\n');
+            loc.col = 0;
+            i++;
+            loc.row++;
+            cursor.x = 0;
+            cursor.y++;
+        } else {
+            i++;
+            loc.col++;
+            cursor.x++;
+        }
+    }
+    if (parsed_body.items[parsed_body.count-1] == '\n')
+        s_pop(&parsed_body);
+    s_push_null(&parsed_body);
+    body = strdup(parsed_body.items);
+    s_free(&parsed_body);
+
+    snippet->marks_count = marks_da.count;
+    snippet->marks = malloc(sizeof(SnippetMark)*marks_da.count);
+    for (size_t m = 0; m < marks_da.count; m++)
+        snippet->marks[m] = marks_da.items[m];
+
+    da_free(&marks_da);
+    snippet->body = body;
+    return true;
+}
+
 int read_key(); // Forward declaration
 void load_config()
 {
@@ -1523,16 +1936,23 @@ void load_config()
         print_error_and_exit("Env variable HOME not set\n");
     }
 
+    static_assert(CONFIG_FIELDS_COUNT == 5, "Set defaults and valid values for all config fields");
     const size_t default_quit_times = 3;
-    const ConfigLineNumbers default_line_numbers = LN_NO;
+    const bool default_tab_to_spaces = true;
+    const size_t default_tab_spaces_number = 4;
 
-    const char *valid_values_field_bool[] = {"true", "false", NULL};
-    (void)valid_values_field_bool;
-
+    const ConfigLineNumbers default_line_numbers = LN_REL;
     Strings valid_values_line_numbers = {0};
     {
         char *values[] = {"no", "absolute", "relative"};
         da_push_many(&valid_values_line_numbers, values, 3);
+    }
+
+    const ConfigLogLevel default_configlog_level = CONFIGLOG_ALL;
+    Strings valid_values_configlog_level = {0};
+    {
+        char *values[] = {"all", "warning", "error"};
+        da_push_many(&valid_values_configlog_level, values, 3);
     }
 
     String config_log = {0};
@@ -1546,34 +1966,44 @@ void load_config()
         config_file = fopen(full_config_path, "w+");
         if (config_file == NULL) {
             s_push_fstr(&config_log, "ERROR: could not create config file\n\n");
-            goto load_config_fail;
+            goto fail;
         }
 
+        static_assert(CONFIG_FIELDS_COUNT == 5, "Write defaults and descriptions for all config fields in fresh config file");
+        // TODO: make the descriptions macro/const
         fprintf(config_file, "set quit_times = %zu\t// times you need to press CTRL-q before exiting without saving\n",
-                default_quit_times); // TODO: make the description a macro/const
-        fprintf(config_file, "set line_numbers = %s\t// display line numbers at_all, absolute or relative to the current line\n",
+                default_quit_times);
+        fprintf(config_file,
+                "set line_numbers = %s\t// display line numbers (don't, absolute or relative to the current line)\n",
                 valid_values_line_numbers.items[default_line_numbers]);
+        fprintf(config_file,
+                "set tab_to_spaces = %s\t// tabs are inserted as spaces\n", BOOL_AS_CSTR(default_tab_to_spaces));
+        fprintf(config_file,
+                "set tab_spaces_number = %zu\t// how many spaces a tab expands to (works only if tab_to_spaces is set to 'true')\n", default_tab_spaces_number);
+        fprintf(config_file,
+                "set configlog_level = %s\t// log level of config (all, warning, error)\n",
+                valid_values_configlog_level.items[default_configlog_level]);
 
         s_push_fstr(&config_log, "NOTE: default config file has been created\n\n");
         rewind(config_file);
     }
 
+    static_assert(CONFIG_FIELDS_COUNT == 5, "Add all config fields to remaining_fields");
     ConfigFields remaining_fields = {0};
-
-    da_push(&remaining_fields, create_field_uint("quit_times", &config.quit_times, default_quit_times));
-    da_push(&remaining_fields, create_field_limited_string("line_numbers", (LimitedStringIndex *)&config.line_numbers,
-                default_line_numbers, valid_values_line_numbers));
+    da_push(&remaining_fields, macro_make_config_field_uint(quit_times));
+    da_push(&remaining_fields, macro_make_config_field_limited_string(line_numbers));
+    da_push(&remaining_fields, macro_make_config_field_bool(tab_to_spaces));
+    da_push(&remaining_fields, macro_make_config_field_uint(tab_spaces_number));
+    da_push(&remaining_fields, macro_make_config_field_limited_string(configlog_level));
     
-    if (DEBUG) {
-        for (size_t i = 0; i < remaining_fields.count; i++) {
-            const ConfigField *field = &remaining_fields.items[i];
-            s_push_fstr(&config_log, "Field { name: `%s`, type: `%s` }\n",
-                    field->name, fieldtype_to_string(field->type));
-        }
-        s_push(&config_log, '\n');
-    }
-
-    ConfigFields inserted_fields = {0};
+    //if (DEBUG) {
+    //    for (size_t i = 0; i < remaining_fields.count; i++) {
+    //        const ConfigField *field = &remaining_fields.items[i];
+    //        s_push_fstr(&config_log, "Field { name: `%s`, type: `%s` }\n",
+    //                field->name, fieldtype_to_string(field->type));
+    //    }
+    //    s_push(&config_log, '\n');
+    //}
 
     commands = (Commands){0};
     static_assert(BUILTIN_CMDS_COUNT == 14, "Add all builtin commands in commands");
@@ -1611,6 +2041,7 @@ void load_config()
     free_command_args(&baked_args);
 
     Tokens tokens = lex_file(full_config_path);
+    ConfigFields inserted_fields = {0};
 
     for (size_t i = 0; i < tokens.count; i++) {
         Token first_token = tokens.items[i];
@@ -1643,7 +2074,7 @@ void load_config()
                             const TokenType TOKEN_BOOL[2] = {TOKEN_TRUE, TOKEN_FALSE};
                             if (!expect_token_to_be_of_types(token_field_value, TOKEN_BOOL, 2, &config_log)) {
                                 s_push_fstr(&config_log, "- NOTE: defaulted to `%s`\n\n",
-                                        removed_field.bool_default ? "true" : "false");
+                                        BOOL_AS_CSTR(removed_field.bool_default));
                                 value = removed_field.bool_default;
                             }
                             if (token_field_value.type == TOKEN_TRUE) value = true;
@@ -1693,9 +2124,9 @@ void load_config()
                                 if (is_wrong_token_type) {
                                     expect_token_to_be_of_types(token_field_value, LIMITED_STRING_TOKENS, 2, &config_log);
                                 } else if (is_str_empty) {
-                                    s_push_fstr(&config_log, LOC_FMT"- ERROR: empty string\n");
+                                    s_push_fstr(&config_log, LOC_FMT"\n- ERROR: empty string\n");
                                 } else if (is_not_valid) {
-                                    s_push_fstr(&config_log, LOC_FMT"- ERROR: string not valid\n");
+                                    s_push_fstr(&config_log, LOC_FMT"\n- ERROR: string not valid\n");
                                 }
                                 s_push_fstr(&config_log,
                                         "- NOTE: value must be a non empty string among one of the following values: ");
@@ -1724,7 +2155,7 @@ void load_config()
                 size_t k = 0;
                 while (!found && k < inserted_fields.count) {
                     if (streq(field_name, inserted_fields.items[k].name)) {
-                        s_push_fstr(&config_log, LOC_FMT"- ERROR: redeclaration of field `%s`\n\n",
+                        s_push_fstr(&config_log, LOC_FMT"\n- ERROR: redeclaration of field `%s`\n\n",
                                 LOC_ARG(token_field_name.loc), field_name);
                         found = true;
                     } else k++;
@@ -1732,7 +2163,7 @@ void load_config()
             }
 
             if (!found) {
-                s_push_fstr(&config_log, LOC_FMT"- ERROR: unknown field `%s`\n\n",
+                s_push_fstr(&config_log, LOC_FMT"\n- ERROR: unknown field `%s`\n\n",
                         LOC_ARG(token_field_name.loc), field_name);
             }
         } break;
@@ -1743,8 +2174,8 @@ void load_config()
             if (!expect_token_to_be_of_type_extra_newline(token_var_name, TOKEN_IDENT, &config_log)) continue;
             char *var_name = token_var_name.string_value;
             bool found = false;
-            for (size_t j = 0; j < vars.count; j++) {
-                if (streq(var_name, vars.items[i].name)) {
+            for (size_t j = 0; j < editor.config.vars.count; j++) {
+                if (streq(var_name, editor.config.vars.items[j].name)) {
                     found = true;
                     break;
                 }
@@ -1767,7 +2198,7 @@ void load_config()
             {
             case TOKEN_IDENT:
                 // TODO: check if there is a variable with this name else treat it like a string? not so sure
-                s_push_fstr(&config_log, LOC_FMT"- TODO: assign identifier to variable '%s'",
+                s_push_fstr(&config_log, LOC_FMT"\n- TODO: assign identifier to variable '%s'",
                         LOC_ARG(token_var_value.loc), var_name);
                 break;
 
@@ -1798,7 +2229,7 @@ void load_config()
 
             default: print_error_and_exit("Unreachable token type parsing variable value in load_config");
             }
-            da_push(&vars, var);
+            da_push(&editor.config.vars, var);
         } break;
 
         case TOKEN_DEF: {
@@ -1818,11 +2249,12 @@ void load_config()
             }
             if (already_defined) continue;
             i++;
-            Token token_colon = tokens.items[i];
-            if (!expect_token_to_be_of_type_extra_newline(token_colon, ':', &config_log)) continue;
-
+            if (!expect_token_to_be_of_type_extra_newline(tokens.items[i], '=', &config_log)) continue;
             i++;
             Command user_defined_cmd = parse_commands_list(tokens, &i, &config_log, WITH_LOCATION);
+
+            // TODO: this is a work in progress, don't delete these comments
+            //
             //Command user_defined_cmd = {0};
             //i++;
             //Token tok_it = tokens.items[i];
@@ -1849,7 +2281,6 @@ void load_config()
             //        }
             //        break;
             //    }
-
             //    char *subcmd_name = tok_it.string_value;
             //    CommandType subcmd_type = get_command_type_from_string(subcmd_name);
             //    if (subcmd_type == UNKNOWN) {
@@ -1861,15 +2292,12 @@ void load_config()
             //        }
             //        break;
             //    }
-
             //    Command subcmd = {
             //        .type = subcmd_type,
             //        .n = n
             //    };
-
             //    i++;
             //    tok_it = tokens.items[i];
-
             //    if (tok_it.type == '(') {
             //        log_this("TODO: parse arguments list for command `%s`", subcmd_name);
             //        i++;
@@ -1881,12 +2309,36 @@ void load_config()
             //        i++;
             //        tok_it = tokens.items[i];
             //    }
-
             //    subcmd.name = strdup(subcmd_name);
             //    da_push(&user_defined_cmd.subcmds, subcmd);
             //}
+
             user_defined_cmd.name = strdup(command_name);
             add_user_defined_command(user_defined_cmd);
+        } break;
+
+        case TOKEN_SNIPPET: {
+            i++;
+            Token token_snippet_handle = tokens.items[i];
+            TokenType SNIPPET_HANDLE_TOKENS[2] = {TOKEN_IDENT, TOKEN_STRING};
+            if (!expect_token_to_be_of_types_extra_newline(token_snippet_handle, SNIPPET_HANDLE_TOKENS, 2, &config_log)) continue;
+            i++;
+            if (!expect_token_to_be_of_type_extra_newline(tokens.items[i], '=', &config_log)) continue;
+            i++;
+            Token token_snippet_body = tokens.items[i];
+            TokenType SNIPPET_BODY_TOKENS[2] = {TOKEN_IDENT, TOKEN_STRING};
+            if (!expect_token_to_be_of_types_extra_newline(token_snippet_body, SNIPPET_BODY_TOKENS, 2, &config_log)) continue;
+            Snippet snippet = {0};
+            if (!parse_snippet_body(token_snippet_body, &snippet, &config_log)) continue;
+            snippet.handle = strdup(token_snippet_handle.string_value);
+            snippet.handle_len = strlen(token_snippet_handle.string_value);
+            snippet.handle_is_prefix = strneq(snippet.handle, snippet.body, snippet.handle_len);
+            //if (DEBUG) {
+            //    if (snippet.is_inline)
+            //        s_push_fstr(&config_log, "\nParsed snippet `%s` = \"%s\"\n", snippet.handle, snippet.body);
+            //    else s_push_fstr(&config_log, "\nParsed snippet `%s` = \"{\n%s\n}\"\n", snippet.handle, snippet.body);
+            //}
+            da_push(&editor.snippets, snippet);
         } break;
 
         case TOKEN_NEWLINE: break;
@@ -1896,7 +2348,7 @@ void load_config()
             break;
 
         default:
-            char *tokstrval = token_type_and_value_as_str(first_token);
+            char *tokstrval = token_type_and_value_as_string(first_token);
             s_push_fstr(&config_log, LOC_FMT"\n- ERROR: unexpected %s\n\n", LOC_ARG(first_token.loc), tokstrval);
             free(tokstrval);
         }
@@ -1905,13 +2357,13 @@ void load_config()
     free_tokens(&tokens);
 
     if (remaining_fields.count > 0) {
-        s_push_cstr(&config_log, "\nWARNING: the following fields have not been set:\n");
+        s_push_cstr(&config_log, "WARNING: the following fields have not been set:\n");
         da_foreach(remaining_fields, ConfigField, field) {
             s_push_fstr(&config_log, " -> %s (type: %s, default: ", field->name, fieldtype_to_string(field->type));
             switch (field->type)
             {
                 case FIELD_BOOL:
-                    s_push_fstr(&config_log, "`%s`)\n", field->bool_default ? "true" : "false");
+                    s_push_fstr(&config_log, "`%s`)\n", BOOL_AS_CSTR(field->bool_default));
                     *field->bool_ptr = field->bool_default;
                     break;
                 case FIELD_UINT:
@@ -1923,7 +2375,8 @@ void load_config()
                     *field->string_ptr = strdup(field->string_default);
                     break;
                 case FIELD_LIMITED_STRING:
-                    s_push_fstr(&config_log, "`%s`)\n", field->limited_string_default);
+                    s_push_fstr(&config_log, "`%s`)\n",
+                            field->limited_string_valid_values.items[field->limited_string_default]);
                     *field->limited_string_ptr = field->limited_string_default;
                     // TODO: magari elencare anche qua i possibili valori
                     break;
@@ -1931,55 +2384,57 @@ void load_config()
                     print_error_and_exit("Unreachable field type in load_config\n");
             }
         }
+        s_push(&config_log, '\n');
     }
 
-    if (DEBUG) {
-        s_push_fstr(&config_log, "\nDefined commands:\n");
-        da_enumerate (commands, Command, i, command) {
-            s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", command->name);
+    //if (DEBUG) {
+    //    s_push_fstr(&config_log, "\nDefined commands:\n");
+    //    da_enumerate (commands, Command, i, command) {
+    //        s_push_fstr(&config_log, "%s: `%s`\n", i < BUILTIN_CMDS_COUNT ? "Builtin" : "User", command->name);
+    //    }
+    //}
+
+    if (s_is_empty(config_log)) return;
+
+fail:
+
+    s_push_null(&config_log);
+
+    bool config_has_errors = strstr(config_log.items, "ERROR") != NULL;
+    bool config_has_warnings = strstr(config_log.items, "WARNING") != NULL;
+
+    bool suppress_logs = !config_has_errors   && (editor.config.configlog_level >= CONFIGLOG_ERROR
+                     || (!config_has_warnings &&  editor.config.configlog_level >= CONFIGLOG_WARNING));
+
+    if (!suppress_logs) {
+        char tmp_filename[] = "/tmp/editor_config_log_XXXXXX";
+        int fd = mkstemp(tmp_filename);
+        if (fd == -1) print_error_and_exit("Could not create temporary file\n");
+        FILE *f = fdopen(fd, "w");
+        if (!f) {
+            close(fd);
+            print_error_and_exit("Could not open temporary file\n"); 
+        }
+
+        fputs(config_log.items, f);
+        fclose(f);
+
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "cat %s | less", tmp_filename);
+
+        pid_t child = fork();
+        switch (child)
+        {
+            case -1: print_error_and_exit("Could not create child process to execute cmd\n");
+            case 0:
+                     execl("/bin/sh", "sh", "-c", cmd, NULL);
+                     exit(0);
+            default: waitpid(child, NULL, 0);
         }
     }
 
-load_config_fail:
-    if (s_is_empty(config_log)) return;
-
-    char tmp_filename[] = "/tmp/editor_config_log_XXXXXX";
-    int fd = mkstemp(tmp_filename);
-    if (fd == -1) print_error_and_exit("Could not create temporary file\n");
-    FILE *f = fdopen(fd, "w");
-    if (!f) {
-        close(fd);
-        print_error_and_exit("Could not open temporary file\n"); 
-    }
-
-    s_push_null(&config_log);
-    fputs(config_log.items, f);
     s_free(&config_log);
-    fclose(f);
-
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "cat %s | less", tmp_filename);
-
-    pid_t child = fork();
-    switch (child)
-    {
-    case -1: print_error_and_exit("Could not create child process to execute cmd\n");
-    case 0:
-        execl("/bin/sh", "sh", "-c", cmd, NULL);
-        exit(0);
-    default: waitpid(child, NULL, 0);
-    }
-
-    // TODO: colors here
-    clear();
-    printw("- Press ENTER to continue ignoring errors and warnings\n");
-    printw("- Press ESC to exit\n");
-    int key;
-    while (true) {
-        key = getch();
-        if (key == ENTER) break;
-        else if (key == ESC) exit(1);
-    }
+    if (config_has_errors) exit(1);
 }
 
 /// END Config 
@@ -2106,6 +2561,8 @@ int read_key()
         case '8'          : return ALT_8;
         case '9'          : return ALT_9;
 
+        case 'c'          : return ALT_c;
+        case 'C'          : return ALT_C;
         case 'k'          : return ALT_k;
         case 'K'          : return ALT_K;
         case 'j'          : return ALT_j;
@@ -2120,6 +2577,7 @@ int read_key()
         case KEY_BACKSPACE: return ALT_BACKSPACE;
         case ':'          : return ALT_COLON;
 
+        case CTRL('C'): return CTRL_ALT_C;
         case CTRL('K'): return CTRL_ALT_K;
         case CTRL('J'): return CTRL_ALT_J;
         case CTRL('H'): return CTRL_ALT_H;
@@ -2127,6 +2585,23 @@ int read_key()
 
         default: return ESC;
     }
+}
+
+#define HIDE_MAIN true
+// TODO: maybe even change cursor color
+void show_ghost_cursor(Cursor cursor, bool hide_main)
+{
+    if (hide_main && editor.cursor.x == cursor.x && editor.cursor.y == cursor.y) return;
+    size_t screen_y = cursor.y - editor.offset;
+    if (screen_y >= win_main.height) return;
+
+    wmove(win_main.win, screen_y, cursor.x);
+    wattrset(win_main.win, A_REVERSE); {
+        char char_at_cursor = mvwinch(win_main.win, screen_y, cursor.x) & A_CHARTEXT;
+        if (char_at_cursor == 0) char_at_cursor = ' ';
+        waddch(win_main.win, char_at_cursor);
+    } wattrset(win_main.win, COLOR_PAIR(DEFAULT_EDITOR_PAIR)); // TODO: rember to change it when the colors
+                                                               //       can be chosen by the user
 }
 
 void update_window_main(void)
@@ -2139,11 +2614,18 @@ void update_window_main(void)
         wprintw(win_main.win, S_FMT"\n", S_ARG(ROW(i)->content));
     }
     if (editor.in_cmd) {
-        wmove(win_main.win, editor.cy, editor.cx);
-        wattron(win_main.win, A_REVERSE);
-        char char_at_cursor = mvwinch(win_main.win, editor.cy, editor.cx) & A_CHARTEXT;
-        waddch(win_main.win, char_at_cursor);
-        wattroff(win_main.win, A_REVERSE);
+        show_ghost_cursor(editor.cursor, !HIDE_MAIN);
+        if (editor.multicursor.is_enabled)
+            da_foreach (editor.sorted_multicursor, Cursor *, cursor)
+                show_ghost_cursor(**cursor, HIDE_MAIN);
+    } else if (!da_is_empty(&editor.multicursor)) {
+        if (editor.multicursor.is_enabled) {
+            da_foreach (editor.sorted_multicursor, Cursor *, cursor)
+                show_ghost_cursor(**cursor, HIDE_MAIN);
+        } else {
+        da_foreach (editor.multicursor, Cursor, cursor)
+            show_ghost_cursor(*cursor, HIDE_MAIN);
+        }
     }
 }
 
@@ -2187,7 +2669,15 @@ void update_window_status(void)
     wprintw(win_status.win, " | ");
     wprintw(win_status.win, "page %zu/%zu", editor.page+1, N_PAGES);
     wprintw(win_status.win, " | ");
-    if (editor.N != N_DEFAULT) wprintw(win_status.win, "%d", editor.N);
+    wprintw(win_status.win, "page %zu/%zu", editor.page+1, N_PAGES);
+    if (editor_is_expanding_snippet()) {
+        wprintw(win_status.win, " | ");
+        wprintw(win_status.win, "expanding snippet `%s`", editor.expanding_snippet.snippet->handle);
+    }
+    if (editor.N != N_DEFAULT) {
+        wprintw(win_status.win, " | ");
+        wprintw(win_status.win, "%d", editor.N);
+    }
 }
 
 #define update_window(window_name)           \
@@ -2208,14 +2698,14 @@ void update_windows(void)
     //Row *row;
     //for (size_t y = editor.offset; y < editor.offset+win_main.height; y++) {
     //    // TODO: si puo' fattorizzare la funzione che aggiunge gli spazi per keep_cursor
-    //    bool is_current_line = y == editor.cy-editor.offset;
+    //    bool is_current_line = y == editor.cursor.y-editor.offset;
 
     //    if (y >= editor.rows.count) {
-    //        if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_INVERSE);
+    //        if (is_current_line && editor.in_cmd && editor.cursor.x == 0) s_push_cstr(&screen_buf, ANSI_INVERSE);
     //        s_push(&screen_buf, '~'); // TODO: poi lo voglio togliere, forse, ma ora lo uso per debuggare
-    //        if (is_current_line && editor.in_cmd && editor.cx == 0) s_push_cstr(&screen_buf, ANSI_RESET);
-    //        if (is_current_line && editor.in_cmd && editor.cx > 0) {
-    //            for (size_t x = 1; x < editor.cx; x++) {
+    //        if (is_current_line && editor.in_cmd && editor.cursor.x == 0) s_push_cstr(&screen_buf, ANSI_RESET);
+    //        if (is_current_line && editor.in_cmd && editor.cursor.x > 0) {
+    //            for (size_t x = 1; x < editor.cursor.x; x++) {
     //                s_push(&screen_buf, ' ');
     //            }
     //            s_push_cstr(&screen_buf, ANSI_INVERSE);
@@ -2260,7 +2750,7 @@ void update_windows(void)
     //    if (len > editor.screen_cols-LINE_NUMBERS_SPACE) len = editor.screen_cols-LINE_NUMBERS_SPACE; // TODO: viene troncata la riga
     //    if (len == 0) {
     //        if (is_current_line && editor.in_cmd) {
-    //            for (size_t x = 0; x < editor.cx; x++) {
+    //            for (size_t x = 0; x < editor.cursor.x; x++) {
     //                s_push(&screen_buf, ' ');
     //            }
     //            s_push_cstr(&screen_buf, ANSI_INVERSE);
@@ -2274,7 +2764,7 @@ void update_windows(void)
     //    int c;
     //    for (size_t x = 0; x < len; x++) {
     //        c = row->content.items[x];
-    //        bool keep_cursor = is_current_line && editor.in_cmd && x == editor.cx-LINE_NUMBERS_SPACE;
+    //        bool keep_cursor = is_current_line && editor.in_cmd && x == editor.cursor.x-LINE_NUMBERS_SPACE;
     //        if (keep_cursor) s_push_cstr(&screen_buf, ANSI_INVERSE);
     //        if (!isprint(c)) {
     //            s_push_cstr(&screen_buf, ANSI_INVERSE);
@@ -2286,8 +2776,8 @@ void update_windows(void)
     //        } else s_push(&screen_buf, c);
     //        if (keep_cursor) s_push_cstr(&screen_buf, ANSI_RESET);
     //    }
-    //    if (is_current_line && editor.in_cmd && len <= editor.cx) {
-    //        for (size_t x = len; x < editor.cx; x++) {
+    //    if (is_current_line && editor.in_cmd && len <= editor.cursor.x) {
+    //        for (size_t x = len; x < editor.cursor.x; x++) {
     //            s_push(&screen_buf, ' ');
     //        }
     //        s_push_cstr(&screen_buf, ANSI_INVERSE);
@@ -2345,10 +2835,10 @@ void update_windows(void)
     //}
 
     ///* Put cursor at its current position. Note that the horizontal position
-    // * at which the cursor is displayed may be different compared to 'editor.cx'
+    // * at which the cursor is displayed may be different compared to 'editor.cursor.x'
     // * because of TABs. */
-    //size_t cx = editor.cx+1;
-    //size_t cy = editor.cy+1;
+    //size_t cx = editor.cursor.x+1;
+    //size_t cy = editor.cursor.y+1;
     //if (editor.in_cmd) {
     //    cx = strlen("Command: ")+editor.cmd_pos+1;
     //    cy = editor.screen_cols-1;
@@ -2371,8 +2861,8 @@ void update_windows(void)
 
 void update_cursor(void)
 {
-    size_t cy = editor.cy;
-    size_t cx = editor.cx;
+    size_t cy = editor.cursor.y;
+    size_t cx = editor.cursor.x;
     WINDOW *win = win_main.win;
 
     if (editor.in_cmd) {
@@ -2392,40 +2882,38 @@ void handle_sigwinch(int signo)
     destroy_windows();
     create_windows();
     
-    if (editor.cy >= win_main.height) editor.cy = win_main.height - 1;
-    if (editor.cx >= win_main.width) editor.cx = win_main.width - 1;
+    if (editor.cursor.y >= win_main.height) editor.cursor.y = win_main.height - 1;
+    if (editor.cursor.x >= win_main.width) editor.cursor.x = win_main.width - 1;
 }
 
 void editor_init()
 {
-    editor = (Editor){0};
-
     get_screen_size();
-    editor.current_quit_times = config.quit_times;
+    editor.current_quit_times = editor.config.quit_times;
     editor.N = N_DEFAULT;
 
     signal(SIGWINCH, handle_sigwinch);
 }
 
-bool open_file(char *filename)
+bool open_file(char *filepath)
 {
+    if (editor.filepath) free(editor.filepath);
     if (editor.filename) free(editor.filename);
     da_clear(&editor.rows);
 
-    if (filename == NULL) {
+    if (filepath == NULL) {
+        editor.filepath = NULL;
         editor.filename = strdup("new");
         return true;
     }
 
-    if (strchr(filename, '/')) {
-        char *tmp = filename + strlen(filename) - 1;
-        while (*tmp != '/') tmp--;
-        filename = tmp+1;
-    }
-    editor.filename = strdup(filename);
+    editor.filepath = strdup(filepath);
 
-    FILE *file = fopen(filename, "r");
+    FILE *file = fopen(filepath, "r");
     if (file == NULL) return false;
+
+    char *last_slash = strrchr(filepath, '/');
+    editor.filename = strdup(last_slash ? last_slash+1 : filepath);
 
     ssize_t res; 
     size_t len;
@@ -2438,7 +2926,10 @@ bool open_file(char *filename)
     }
     free(line);
     if (errno) return false;
-    editor.cx = 0;
+
+    // TODO: set cursor (0,0)
+    editor.cursor.x = 0;
+
     return true;
 }
 
@@ -2462,57 +2953,57 @@ void move_page_up() // TODO: non funziona benissimo
 {
     if (editor.page > 0) editor.page--;
     else editor.page = 0;
-    editor.offset = editor.page*win_main.height + editor.cy;
+    editor.offset = editor.page*win_main.height + editor.cursor.y;
 }             
 
 void move_page_down() // TODO: non funziona benissimo
 {
     if (editor.page < N_PAGES-2) editor.page++;
     else editor.page = N_PAGES-1;
-    editor.offset = editor.page*win_main.height + editor.cy;
+    editor.offset = editor.page*win_main.height + editor.cursor.y;
 }           
 
-static inline void move_cursor_begin_of_screen() { editor.cy = 0; }
+static inline void move_cursor_begin_of_screen() { editor.cursor.y = 0; }
 
-static inline void move_cursor_end_of_screen() { editor.cy = win_main.height-1; }
+static inline void move_cursor_end_of_screen() { editor.cursor.y = win_main.height-1; }
 
 void move_cursor_begin_of_file()
 {
     editor.page = 0;
     editor.offset = 0;
-    editor.cy = 0;
+    editor.cursor.y = 0;
 }     
 
 void move_cursor_end_of_file() 
 {
     editor.page = N_PAGES-1;
     editor.offset = editor.rows.count-win_main.height;
-    editor.cy = win_main.height-1;
+    editor.cursor.y = win_main.height-1;
 }
 
-static inline void move_cursor_begin_of_line() { editor.cx = 0; }
-static inline void move_cursor_end_of_line() { editor.cx = win_main.width-1; }
+static inline void move_cursor_begin_of_line() { editor.cursor.x = 0; }
+static inline void move_cursor_end_of_line() { editor.cursor.x = win_main.width-1; }
 
 void move_cursor_first_non_space()
 {
     size_t count = CURRENT_ROW->content.count;
     if (count == 0) return;
-    editor.cx = 0;
-    while (editor.cx < count && isspace(CURRENT_CHAR))
-        editor.cx++;
+    editor.cursor.x = 0;
+    while (editor.cursor.x < count && isspace(CURRENT_CHAR))
+        editor.cursor.x++;
 }
 
 void move_cursor_last_non_space()
 {
     size_t count = CURRENT_ROW->content.count;
     if (count == 0) {
-        editor.cx = 0;
+        editor.cursor.x = 0;
         return;
     }
-    editor.cx = count - 1;
-    while (editor.cx > 0 && isspace(CURRENT_CHAR))
-        editor.cx--;
-    if (editor.cx != win_main.width-1) editor.cx++;
+    editor.cursor.x = count - 1;
+    while (editor.cursor.x > 0 && isspace(CURRENT_CHAR))
+        editor.cursor.x--;
+    if (editor.cursor.x != win_main.width-1) editor.cursor.x++;
 }
 
 void itoa(int n, char *buf)
@@ -2582,7 +3073,7 @@ void delete_char_at(Row *row, size_t at)
     s_remove(&row->content, at);
 }
 
-void delete_char()
+void delete_char_internal()
 {
     if (editor.in_cmd) {
         if (editor.cmd.count <= 0) return;
@@ -2603,18 +3094,54 @@ void delete_char()
         x = prev->content.count;
         s_push_str(&prev->content, row->content.items, row->content.count);
         da_remove(&editor.rows, y);
-        if (editor.cy == 0) editor.offset--;
-        else editor.cy--;
-        editor.cx = x;
-        if (editor.cx >= win_main.width) {
-            int shift = (win_main.width-editor.cx)+1;
-            editor.cx -= shift;
+        if (editor.cursor.y == 0) editor.offset--;
+        else editor.cursor.y--;
+        editor.cursor.x = x;
+        if (editor.cursor.x >= win_main.width) {
+            int shift = (win_main.width-editor.cursor.x)+1;
+            editor.cursor.x -= shift;
         }
     } else {
         delete_char_at(row, x-1);
-        if (editor.cx > 0) editor.cx--;
+        if (editor.cursor.x > 0) editor.cursor.x--;
     }
     editor.dirty++;
+}
+
+void delete_char(void)
+{
+    if (!editor.multicursor.is_enabled || editor.in_cmd) {
+        delete_char_internal();
+        return;
+    }
+
+    Cursor saved_main = editor.cursor;
+
+    for (size_t i = 0; i < editor.sorted_multicursor.count; i++) {
+        Cursor *current = editor.sorted_multicursor.items[i];
+        editor.cursor = (current == &editor.cursor) ? saved_main : *current;
+        delete_char_internal();
+        if (current == &editor.cursor) saved_main = editor.cursor;
+        else {
+            *current = editor.cursor;
+            editor.cursor = saved_main;
+        }
+
+        // Shift Adjustment for Deletion
+        for (size_t j = 0; j < i; j++) {
+            Cursor *processed = editor.sorted_multicursor.items[j];
+            // If we are on same line, shift left
+            if (processed->y == current->y && processed->x > 0) {
+                processed->x--;
+            }
+            // If we merged lines (deleted newline), shift rows up
+            // (Detection of line merge requires checking if row count changed, 
+            // which is tricky here without return values. 
+            // Basic implementation: Shift X left.)
+            if (processed == &editor.cursor) saved_main = *processed;
+        }
+    }
+    editor.cursor = saved_main;
 }
 
 // TODO: non funziona
@@ -2651,7 +3178,7 @@ void delete_word()
             x--;
         }
     }
-    editor.cx = x;
+    editor.cursor.x = x;
     editor.dirty++;
 }
 
@@ -2668,38 +3195,135 @@ bool set_N(int key)
     return true;
 }
 
-void complete_snippet(void)
+void expanding_snippet_next_mark(void)
+{
+    if (!editor_is_expanding_snippet()) return;
+
+    da_clear(&editor.multicursor);
+    editor.multicursor.is_enabled = false;
+
+    Snippet *snippet = editor.expanding_snippet.snippet;
+    size_t mark_index = editor.expanding_snippet.mark_index + 1;
+    log_this("expanding_snippet_next_mark: %zu", mark_index);
+    while (mark_index < snippet->marks_count && !snippet->marks[mark_index].is_primary)
+        mark_index++;
+    log_this("skipped secondary marks");
+    if (mark_index >= snippet->marks_count) {
+        log_this("finished expanding snippet");
+        editor.expanding_snippet.snippet = NULL;
+        editor.expanding_snippet.mark_index = -1;
+        disable_multicursor();
+        return;
+    }
+
+    SnippetMark mark = snippet->marks[mark_index];
+    log_this("Setting mark `%s` - %s - (%zu, %zu)", mark.name ? mark.name : "unnamed",
+            mark.is_primary ? "primary" : "secondary", mark.cursor.x, mark.cursor.y);
+    editor.expanding_snippet.mark_index = mark_index;
+    size_t indentation = editor.expanding_snippet.base_cursor.x;
+
+    Cursor absolute_cursor_from(Cursor relative_cursor)
+    {
+        return (Cursor){
+            .x = ((relative_cursor.y == 0) ? editor.expanding_snippet.base_cursor.x : indentation) + relative_cursor.x,
+            .y = editor.expanding_snippet.base_cursor.y + relative_cursor.y
+        };
+    }
+    editor.cursor = absolute_cursor_from(mark.cursor);
+    log_this("Set primary mark at (%zu, %zu)", editor.cursor.x, editor.cursor.y);
+
+    if (mark.name) {
+        for (size_t i = mark_index+1; i < snippet->marks_count; i++) {
+            SnippetMark *candidate = &snippet->marks[i];
+            if (candidate->name && streq(candidate->name, mark.name)) {
+                Cursor candidate_absolute_cursor = absolute_cursor_from(candidate->cursor);
+                log_this("Set secondary mark at (%zu, %zu)", candidate_absolute_cursor.x, candidate_absolute_cursor.y);
+                da_push(&editor.multicursor, candidate_absolute_cursor);
+            }
+        }
+    }
+
+    if (!da_is_empty(&editor.multicursor)) enable_multicursor();
+}
+
+void try_to_expand_snippet(void)
 {
     Snippet *snippet_to_expand = NULL;
     da_foreach (editor.snippets, Snippet, snippet) {
-        log_this("Snippet: '%s' (%zu) -> '%s'", snippet->handle, snippet->handle_len, snippet->expansion);
+        if (editor.in_cmd && !snippet->is_inline) continue; // NOTE: cannot expand non inline snippets in command line
         if (CURRENT_X_POS < snippet->handle_len) continue;
+        assert(snippet->handle);
         size_t i = 0;
         bool matches = true;
         while (i < snippet->handle_len) {
-            char c = CHAR(CURRENT_Y_POS, CURRENT_X_POS-i-1);
-            log_this("Comparing characters '%c' - '%c'", snippet->handle[i], c);
-            if (snippet->handle[i] != c) {
+            char snippet_char = snippet->handle[snippet->handle_len-i-1];
+            char current_char = CHAR(CURRENT_Y_POS, CURRENT_X_POS-i-1);
+            if (snippet_char != current_char) {
                 matches = false;
                 break;
             }
             i++;
-        }    
+        }
         if (matches && (!snippet_to_expand || snippet->handle_len > snippet_to_expand->handle_len))
             snippet_to_expand = snippet;
     }
     if (!snippet_to_expand) {
-        write_message("ERROR: no expansion found");
+        write_message("ERROR: no snippet handle found");
         return;
     }
-    write_message("TODO: perform expansion from handle '%s'", snippet_to_expand->handle);
+
+    log_this("Expanding snippet: '%s' (%zu - %s) -> '%s'", snippet_to_expand->handle, snippet_to_expand->handle_len,
+            BOOL_AS_CSTR(snippet_to_expand->is_inline), snippet_to_expand->body);
+
+    char *body = snippet_to_expand->body;
+    if (snippet_to_expand->handle_is_prefix) {
+        body += snippet_to_expand->handle_len;
+    } else {
+        for (size_t i = 0; i < snippet_to_expand->handle_len; i++) delete_char();
+    }
+
+    editor.expanding_snippet.base_cursor.x = CURRENT_X_POS - snippet_to_expand->handle_len;
+    editor.expanding_snippet.base_cursor.y = CURRENT_Y_POS;
+
+    if (snippet_to_expand->is_inline) insert_cstr(body); 
+    else {
+        // TODO: it should check for tabs
+        size_t indentation = CURRENT_X_POS - (snippet_to_expand->handle_is_prefix ? snippet_to_expand->handle_len : 0);
+        char *current = body;
+        char *next_newline = NULL;
+        while (current) {
+            next_newline = strchr(current, '\n');
+            if (next_newline) *next_newline = '\0';
+            if (current != body && *current)
+                // TODO: it may insert a tab based on indentation size and config
+                for (size_t i = 0; i < indentation; i++) insert_char(' ');
+            insert_cstr(current);
+            if (next_newline) {
+                insert_char('\n');
+                current = next_newline + 1;
+            } else current = NULL;
+        }
+    }
+
+
+    if (snippet_to_expand->marks_count > 0) {
+        log_this("\nMarks:");
+        for (size_t i = 0; i < snippet_to_expand->marks_count; i++) {
+            SnippetMark *m = &snippet_to_expand->marks[i];
+            log_this("Mark `%s` - %s - (%zu, %zu)", m->name ? m->name : "unnamed",
+                    m->is_primary ? "primary" : "secondary", m->cursor.x, m->cursor.y);
+        }
+        log_this("\n");
+        editor.expanding_snippet.snippet = snippet_to_expand;
+        editor.expanding_snippet.mark_index = -1;
+        expanding_snippet_next_mark();
+    }
 }
 
 void process_pressed_key(void)
 {
     int key = read_key();
     if (key == ERR) return;
-    log_this("Read key %d", key);
 
     bool has_inserted_number = false;
 
@@ -2761,6 +3385,10 @@ void process_pressed_key(void)
             } else cs_next(&editor.messages);
             break;
 
+        case ALT_c: add_multicursor_mark(); break;
+        case ALT_C: enable_multicursor(); break;
+        case CTRL_ALT_C: disable_multicursor(); break;
+
         case CTRL_K: N_TIMES scroll_up();   break;
         case CTRL_J: N_TIMES scroll_down(); break;
 
@@ -2788,17 +3416,18 @@ void process_pressed_key(void)
             if (editor.in_cmd) {
                 // TODO: autocomplete command
             } else {
-                write_message("TODO: insert TAB");
-                //insert_char('\t');
                 N_TIMES {
-                    // TODO: tab to spaces + numero di spazi (config)
-                    for (int i = 0; i < 4; i++) insert_char(' ');
+                    if (editor.config.tab_to_spaces) {
+                        for (size_t i = 0; i < editor.config.tab_spaces_number; i++)
+                            insert_char(' ');
+                    } else insert_char('\t');
                 }
             }
             break;
 
         case KEY_BTAB:
-            complete_snippet();
+            if (editor_is_expanding_snippet()) expanding_snippet_next_mark();
+            else try_to_expand_snippet();
             break;
 
         case ENTER: // TODO: se si e' in_cmd si esegue execute_command (che fa anche il resto)
@@ -2832,7 +3461,7 @@ void process_pressed_key(void)
             break;
     }
     if (!has_inserted_number) editor.N = N_DEFAULT;
-    editor.current_quit_times = config.quit_times;
+    editor.current_quit_times = editor.config.quit_times;
 }
 
 int main(int argc, char **argv)
@@ -2842,7 +3471,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    char *filename = argc == 2 ? argv[1] : NULL;
+    char *filepath = argc == 2 ? argv[1] : NULL;
 
     log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
 
@@ -2852,17 +3481,8 @@ int main(int argc, char **argv)
     initialize_colors();
     create_windows();
 
-    { // TODO: prova
-        Snippet s = {
-            .handle = "ejad",
-            .handle_len = 4,
-            .expansion = "daje roma daje"
-        };
-        da_push(&editor.snippets, s);
-    }
-
-    if (!open_file(filename)) {
-        if (filename) print_error_and_exit("Could not open file `%s`. %s.\n", filename, errno ? strerror(errno) : "");
+    if (!open_file(filepath)) {
+        if (filepath) print_error_and_exit("Could not open file `%s`. %s.\n", filepath, errno ? strerror(errno) : "");
         else          print_error_and_exit("Could not open new file. %s.\n", errno ? strerror(errno) : "");
     }
 
@@ -2875,5 +3495,6 @@ int main(int argc, char **argv)
 
     // NOTE: this code should be unreachable
     ncurses_end();
+
     return 0;
 }
